@@ -305,6 +305,8 @@ class TokenSimulator(tk.Toplevel):
 
 # ---------------------------------------------------------------- Draggable Overlay (In-Game / Stream Overlay)
 
+# ---------------------------------------------------------------- Draggable Overlay (In-Game / Stream Overlay)
+
 class StatsOverlay(tk.Toplevel):
     def __init__(self, parent, store):
         super().__init__(parent)
@@ -324,6 +326,15 @@ class StatsOverlay(tk.Toplevel):
         header = tk.Frame(container, bg=SURFACE2, cursor="fleur")
         header.pack(fill="x", padx=4, pady=4)
         tk.Label(header, text="◆ CHEST TRACKER OVERLAY", bg=SURFACE2, fg=ACCENT, font=font(8, "bold")).pack(side="left", padx=6, pady=4)
+        
+        # Lock / Unlock Click-Through Toggle Button
+        self.is_interactive = True
+        self.lock_btn = tk.Label(header, text="🔓", bg=SURFACE2, fg=MUTED, font=font(9, "bold"), cursor="hand2")
+        self.lock_btn.pack(side="right", padx=(2, 6))
+        self.lock_btn.bind("<Button-1>", lambda e: self.toggle_click_through())
+        self.lock_btn.bind("<Enter>", lambda e: self.lock_btn.config(fg=TEXT))
+        self.lock_btn.bind("<Leave>", lambda e: self.lock_btn.config(fg=MUTED))
+
         close_btn = tk.Label(header, text="×", bg=SURFACE2, fg=MUTED, font=font(10, "bold"), cursor="hand2")
         close_btn.pack(side="right", padx=6)
         close_btn.bind("<Button-1>", lambda e: self.destroy())
@@ -338,7 +349,6 @@ class StatsOverlay(tk.Toplevel):
         body = tk.Frame(container, bg=SURFACE)
         body.pack(fill="both", expand=True, padx=12, pady=(2, 12))
         
-        # Overall Stats
         tk.Label(body, text="TOTAL CHESTS", bg=SURFACE, fg=MUTED, font=font(7, "bold")).pack(anchor="w")
         self.lbl_total = tk.Label(body, text="0", bg=SURFACE, fg=ACCENT, font=font(24, "bold"))
         self.lbl_total.pack(anchor="w")
@@ -349,10 +359,8 @@ class StatsOverlay(tk.Toplevel):
         self.lbl_token = tk.Label(body, text="Token Chance: -", bg=SURFACE, fg=VIOLET, font=font(9, "bold"))
         self.lbl_token.pack(anchor="w", pady=(1, 4))
 
-        # Divider line
         tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=4)
 
-        # Session & Last Match Section
         tk.Label(body, text="CURRENT SESSION & LAST MATCH", bg=SURFACE, fg=MUTED, font=font(7, "bold")).pack(anchor="w", pady=(2, 0))
         self.lbl_session = tk.Label(body, text="Session Matches: 0", bg=SURFACE, fg=TEXT, font=font(9))
         self.lbl_session.pack(anchor="w", pady=(1, 0))
@@ -360,7 +368,6 @@ class StatsOverlay(tk.Toplevel):
         self.lbl_last_match = tk.Label(body, text="Last Match: None", bg=SURFACE, fg=MUTED, font=font(8), wraplength=200, justify="left")
         self.lbl_last_match.pack(anchor="w", pady=(2, 0))
 
-        # Initial geometry position (top-right corner of screen)
         self.update_idletasks()
         w_w = 230
         w_h = 210
@@ -369,11 +376,36 @@ class StatsOverlay(tk.Toplevel):
         self.geometry(f"{w_w}x{w_h}+{x}+{y}")
         self.update_stats()
 
+    def toggle_click_through(self):
+        """Toggle the window between interactive (movable/closable) and click-through (gameplay mode)."""
+        try:
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, -20) # GWL_EXSTYLE
+            
+            if self.is_interactive:
+                # Enable click-through: Add WS_EX_TRANSPARENT (0x00000020) and keep WS_EX_LAYERED
+                ctypes.windll.user32.SetWindowLongW(hwnd, -20, ex_style | 0x00000020 | 0x00080000)
+                self.is_interactive = False
+                self.lock_btn.config(text="🔒", fg=WARN)
+                # Change header cursor back to default since it's locked
+                self.winfo_children()[0].winfo_children()[0].master.config(cursor="")
+            else:
+                # Disable click-through: Remove WS_EX_TRANSPARENT
+                ctypes.windll.user32.SetWindowLongW(hwnd, -20, ex_style & ~0x00000020)
+                self.is_interactive = True
+                self.lock_btn.config(text="🔓", fg=MUTED)
+        except Exception:
+            pass
+
     def _start_move(self, event):
+        if not self.is_interactive:
+            return
         self._x = event.x
         self._y = event.y
 
     def _do_move(self, event):
+        if not self.is_interactive:
+            return
         x = self.winfo_x() + (event.x - self._x)
         y = self.winfo_y() + (event.y - self._y)
         self.geometry(f"+{x}+{y}")
@@ -391,7 +423,6 @@ class StatsOverlay(tk.Toplevel):
         self.lbl_token.config(text=f"Token Chance: {fmt_pct(token_chance(total))}" if total > 0 else "Token Chance: -")
         self.lbl_session.config(text=f"Session Matches Counted: {matches_count}")
 
-        # Fetch last match info from store if available
         items = sorted(self.store.replay_list().items(), key=lambda kv: kv[1].get("mtime", 0), reverse=True)
         if items:
             _, r = items[0]
