@@ -26,7 +26,7 @@ Drop rates are random. Reaching the estimated drop rate does not guarantee recei
 1. Download the latest release.
 2. Extract the ZIP file.
 3. Open the extracted folder.
-4. Run `Start.bat`.
+4. Run `Start Chest Tracker FIXED.bat`.
 5. Allow the application to install any required dependencies.
 6. Launch the tracker.
 
