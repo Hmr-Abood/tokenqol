@@ -1,4 +1,4 @@
-# Fortnite Chest Tracker
+<img width="526" height="308" alt="image" src="https://github.com/user-attachments/assets/1a864c62-eea6-4c38-bf3f-15cbe4771504" /># Fortnite Chest Tracker
 
 A Windows application that tracks Fortnite chest openings by analyzing locally saved match replay files.
 
@@ -10,8 +10,14 @@ A Windows application that tracks Fortnite chest openings by analyzing locally s
 - Maintains match history.
 - Calculates Pirate Shop Access drop probabilities.
 - Simulates chest openings.
+<img width="633" height="702" alt="image" src="https://github.com/user-attachments/assets/bdd7d507-aada-4c04-a6d9-2365060f540f" />
+
 - Displays Treasure Hour schedules and reward multipliers.
+<img width="1719" height="1079" alt="image" src="https://github.com/user-attachments/assets/4a21c0d3-f8a0-4317-bdf9-e481170eb749" />
+
 - Provides a graphical user interface.
+<img width="881" height="750" alt="image" src="https://github.com/user-attachments/assets/d83e8eea-d3a1-45b6-8be7-30ac440fb3e3" />
+
 
 ## Pirate Shop Access
 
