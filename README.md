@@ -66,7 +66,7 @@ The application operates independently of the running game. However, this does n
 
 **Application does not start**
 - Make sure all extracted files are present.
-- Run `Start.bat` again.
+- Run `Start Chest Tracker FIXED.bat` again.
 - Check that required dependencies installed successfully.
 
 ## Disclaimer
