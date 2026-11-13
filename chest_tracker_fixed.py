@@ -39,8 +39,7 @@ SRC_DIR = os.path.join(TOOLS, "reader_src")
 LOG_FILE = os.path.join(TOOLS, "setup.log")
 DEMOS = os.path.join(LOCAL, "FortniteGame", "Saved", "Demos")
 
-REPO_SHA = "59515cf4781e60d2c14ba39d8dcab1d7fb986f17"
-REPO_ZIP = f"https://codeload.github.com/Cristiano3120/MoreFortniteReplayDecompression/zip/{REPO_SHA}"
+
 DOTNET_INSTALL = "https://dot.net/v1/dotnet-install.ps1"
 
 READER_VERSION = 6
