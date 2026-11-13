@@ -1,4 +1,3 @@
-<img width="526" height="308" alt="image" src="https://github.com/user-attachments/assets/1a864c62-eea6-4c38-bf3f-15cbe4771504" /># Fortnite Chest Tracker
 
 A Windows application that tracks Fortnite chest openings by analyzing locally saved match replay files.
 
