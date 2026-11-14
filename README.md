@@ -1,4 +1,4 @@
-# Fortnite Chest Tracker
+<img width="948" height="781" alt="image" src="https://github.com/user-attachments/assets/af87c17d-ade8-4976-a392-853365ac3ea2" /># Fortnite Chest Tracker
 
 A Windows desktop tool for tracking Fortnite chest openings, monitoring Pirate Shop progress, and analyzing reward probabilities.
 
@@ -6,6 +6,7 @@ A Windows desktop tool for tracking Fortnite chest openings, monitoring Pirate S
 
 ### Chest Tracking
 - Automatically scans locally saved Fortnite replay files.
+  
 - Tracks your total chest openings.
 - Tracks each teammate's chest count individually.
 - View chest statistics across multiple matches.
