@@ -1,8 +1,9 @@
 """
 Chest Tracker for Fortnite - Windows desktop app.
 
-Counts the chests you loot in Fortnite by reading the replays (.replay) the game saves after each match.
-Every chest in a replay records which player opened it, so only YOUR chests are counted.
+Counts the chests you (and, optionally, your teammates) loot in Fortnite by reading the replays (.replay)
+the game saves after each match. Every chest in a replay records which player opened it, so chests opened
+by enemies or other teams are never counted.
 It never touches the game or its memory: it only reads files Fortnite already writes to your PC.
 """
 
@@ -14,6 +15,7 @@ import math
 import os
 import queue
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -21,12 +23,13 @@ import threading
 import time
 import tkinter as tk
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 import zipfile
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, colorchooser
 
-APP_VERSION = "1.3"
+APP_VERSION = "1.5"
 
 # ---------------------------------------------------------------- paths & constants
 
@@ -41,8 +44,10 @@ DEMOS = os.path.join(LOCAL, "FortniteGame", "Saved", "Demos")
 
 
 DOTNET_INSTALL = "https://dot.net/v1/dotnet-install.ps1"
+# Source of the replay reader library (was referenced but not defined in the file you sent).
+REPO_ZIP = "https://github.com/Shiqan/FortniteReplayDecompressor/archive/refs/heads/master.zip"
 
-READER_VERSION = 6
+READER_VERSION = 9
 BIN_DIR = os.path.join(TOOLS, f"reader_v{READER_VERSION}")
 READER_DLL = os.path.join(BIN_DIR, "ChestReplayReader.dll")
 
@@ -54,6 +59,14 @@ DEFAULT_TYPES = [
 NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 QUIET_SECONDS = 90
 READ_TIMEOUT = 600
+
+SKIN_DIR = os.path.join(TOOLS, "skins")
+SKIN_API = "https://fortnite-api.com/v2/cosmetics/br/"
+
+# update checker
+REPO_URL = "https://github.com/Hmr-Abood/tokenqol"
+RAW_SCRIPT = "https://raw.githubusercontent.com/Hmr-Abood/tokenqol/main/chest_tracker_fixed.py"
+RELEASE_API = "https://api.github.com/repos/Hmr-Abood/tokenqol/releases/latest"
 
 # ---------------------------------------------------------------- theme
 
@@ -73,6 +86,9 @@ HOVER = "#6ff0e4"
 ON_ACCENT = "#06201e"
 LOGO = "\u25C6"
 
+FONT_FAMILY = "Segoe UI"
+FONT_SCALE = 1.0
+
 THEMES = {
     "classic": dict(BG="#0e1014", SURFACE="#161a21", SURFACE2="#1d222b", BORDER="#2a303b", TEXT="#e9ecf3",
                     MUTED="#8a93a6", ACCENT="#36d6c8", ACCENT_DIM="#1d7f78", VIOLET="#9d8cff", GOOD="#4ade80",
@@ -80,11 +96,79 @@ THEMES = {
     "pirate": dict(BG="#0a1420", SURFACE="#112131", SURFACE2="#1a2e43", BORDER="#2d4560", TEXT="#f4ead5",
                    MUTED="#9fb0bd", ACCENT="#e9b440", ACCENT_DIM="#8f6b1c", VIOLET="#e4604f", GOOD="#5fd39a",
                    WARN="#f2a33a", BAD="#f2705f", HOVER="#f7cd6e", ON_ACCENT="#2a1b04", LOGO="\u2620"),
+    "ocean": dict(BG="#08121c", SURFACE="#0f1e2d", SURFACE2="#162b3f", BORDER="#25405a", TEXT="#e6f1fa",
+                  MUTED="#8aa3b8", ACCENT="#3fa9f5", ACCENT_DIM="#1f5f94", VIOLET="#7aa2ff", GOOD="#4ade80",
+                  WARN="#fbbf24", BAD="#f87171", HOVER="#7cc4fa", ON_ACCENT="#04121f", LOGO="\u25C6"),
+    "crimson": dict(BG="#120a0d", SURFACE="#1c1116", SURFACE2="#27181f", BORDER="#43262f", TEXT="#f3e8ea",
+                    MUTED="#a8909a", ACCENT="#ff4d6d", ACCENT_DIM="#8f2a3d", VIOLET="#ff9e7a", GOOD="#4ade80",
+                    WARN="#fbbf24", BAD="#ff8a8a", HOVER="#ff8099", ON_ACCENT="#2a0710", LOGO="\u25C6"),
+    "forest": dict(BG="#0b130e", SURFACE="#121d16", SURFACE2="#1a2a20", BORDER="#2b4533", TEXT="#e8f2ea",
+                   MUTED="#8fa898", ACCENT="#6fdc8c", ACCENT_DIM="#357a4a", VIOLET="#c3e88d", GOOD="#4ade80",
+                   WARN="#fbbf24", BAD="#f87171", HOVER="#9bf0b1", ON_ACCENT="#05200d", LOGO="\u25C6"),
+    "light": dict(BG="#f3f5f9", SURFACE="#ffffff", SURFACE2="#e8ecf3", BORDER="#cfd6e2", TEXT="#1b2230",
+                  MUTED="#667087", ACCENT="#0e9f94", ACCENT_DIM="#7fd0c9", VIOLET="#6b57e6", GOOD="#16a34a",
+                  WARN="#d98a04", BAD="#dc2626", HOVER="#12bfb2", ON_ACCENT="#ffffff", LOGO="\u25C6"),
 }
 
+# colors the user can override one by one (key, label)
+COLOR_LABELS = (
+    ("BG", "Background"), ("SURFACE", "Cards"), ("SURFACE2", "Buttons and inputs"), ("BORDER", "Borders"),
+    ("TEXT", "Main text"), ("MUTED", "Secondary text"), ("ACCENT", "Accent"),
+    ("VIOLET", "Highlight (token chance)"), ("GOOD", "Success"), ("WARN", "Warning"), ("BAD", "Error"),
+)
+COLOR_KEYS = tuple(k for k, _ in COLOR_LABELS)
 
-def apply_theme(name):
-    globals().update(THEMES.get(name) or THEMES["classic"])
+FONT_CHOICES = ("Segoe UI", "Arial", "Verdana", "Trebuchet MS", "Tahoma", "Calibri", "Georgia", "Consolas",
+                "Comic Sans MS")
+LOGO_CHOICES = ("Default", "\u25C6", "\u2620", "\u2605", "\u2665", "\u2693", "\u26A1", "\u2618", "\u25CF")
+
+
+def valid_hex(v):
+    return isinstance(v, str) and len(v) == 7 and v[0] == "#" and all(c in "0123456789abcdefABCDEF" for c in v[1:])
+
+
+def _rgb(h):
+    return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
+
+
+def mix(a, b, t):
+    """Blend color a toward color b by fraction t (0..1)."""
+    ra, ga, ba = _rgb(a)
+    rb, gb, bb = _rgb(b)
+    return "#%02x%02x%02x" % (round(ra + (rb - ra) * t), round(ga + (gb - ga) * t), round(ba + (bb - ba) * t))
+
+
+def luminance(h):
+    r, g, b = _rgb(h)
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255
+
+
+def build_theme(name, custom=None):
+    t = dict(THEMES.get(name) or THEMES["classic"])
+    custom = custom or {}
+    for k in COLOR_KEYS:
+        if valid_hex(custom.get(k)):
+            t[k] = custom[k].lower()
+    # derived colors follow the accent / background when the user changed those
+    if valid_hex(custom.get("ACCENT")) or valid_hex(custom.get("BG")):
+        t["ACCENT_DIM"] = mix(t["ACCENT"], t["BG"], 0.5)
+    if valid_hex(custom.get("ACCENT")):
+        t["HOVER"] = mix(t["ACCENT"], "#ffffff", 0.35)
+        t["ON_ACCENT"] = "#06201e" if luminance(t["ACCENT"]) > 0.5 else "#ffffff"
+    return t
+
+
+def apply_theme(name, custom=None):
+    globals().update(build_theme(name, custom))
+
+
+def apply_fonts(family, pct):
+    global FONT_FAMILY, FONT_SCALE
+    FONT_FAMILY = family or "Segoe UI"
+    try:
+        FONT_SCALE = max(0.8, min(1.5, int(pct) / 100))
+    except (TypeError, ValueError):
+        FONT_SCALE = 1.0
 
 
 SCALE = 1.0
@@ -113,13 +197,13 @@ def px(n):
 
 
 def font(size, weight="normal"):
-    return ("Segoe UI", size, weight)
+    return (FONT_FAMILY, max(6, int(round(size * FONT_SCALE))), weight)
 
 
 # ---------------------------------------------------------------- token roll simulator
 
 MAX_ROLLS = 1_000_000
-MAX_LINES = 5000          
+MAX_LINES = 5000
 
 SPEEDS = {
     "Slow (1 per 0.15 s)": (1, 150),
@@ -153,7 +237,7 @@ class TokenSimulator(tk.Toplevel):
         return int(round(n * self.scale))
 
     def f(self, size, weight="normal"):
-        return ("Segoe UI", size, weight)
+        return font(size, weight)
 
     def _btn(self, parent, text, command, primary=False):
         t = self.t
@@ -305,37 +389,37 @@ class TokenSimulator(tk.Toplevel):
 
 # ---------------------------------------------------------------- Draggable Overlay (In-Game / Stream Overlay)
 
-# ---------------------------------------------------------------- Draggable Overlay (In-Game / Stream Overlay)
-
 class StatsOverlay(tk.Toplevel):
     def __init__(self, parent, store):
         super().__init__(parent)
         self.store = store
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.attributes("-alpha", 0.90)
+        self.set_opacity(store.setting("overlay_opacity"))
         self.configure(bg=BORDER)
-        
+
         self._x = 0
         self._y = 0
-        
+
         container = tk.Frame(self, bg=SURFACE)
         container.pack(fill="both", expand=True, padx=1, pady=1)
-        
+
         # Header / Drag handle bar
         header = tk.Frame(container, bg=SURFACE2, cursor="fleur")
         header.pack(fill="x", padx=4, pady=4)
-        tk.Label(header, text="◆ CHEST TRACKER OVERLAY", bg=SURFACE2, fg=ACCENT, font=font(8, "bold")).pack(side="left", padx=6, pady=4)
-        
+        tk.Label(header, text=f"{LOGO} CHEST TRACKER OVERLAY", bg=SURFACE2, fg=ACCENT,
+                 font=font(8, "bold")).pack(side="left", padx=6, pady=4)
+
         # Lock / Unlock Click-Through Toggle Button
         self.is_interactive = True
-        self.lock_btn = tk.Label(header, text="🔓", bg=SURFACE2, fg=MUTED, font=font(9, "bold"), cursor="hand2")
+        self.header = header
+        self.lock_btn = tk.Label(header, text="\U0001F513", bg=SURFACE2, fg=MUTED, font=font(9, "bold"), cursor="hand2")
         self.lock_btn.pack(side="right", padx=(2, 6))
         self.lock_btn.bind("<Button-1>", lambda e: self.toggle_click_through())
         self.lock_btn.bind("<Enter>", lambda e: self.lock_btn.config(fg=TEXT))
         self.lock_btn.bind("<Leave>", lambda e: self.lock_btn.config(fg=MUTED))
 
-        close_btn = tk.Label(header, text="×", bg=SURFACE2, fg=MUTED, font=font(10, "bold"), cursor="hand2")
+        close_btn = tk.Label(header, text="\u00d7", bg=SURFACE2, fg=MUTED, font=font(10, "bold"), cursor="hand2")
         close_btn.pack(side="right", padx=6)
         close_btn.bind("<Button-1>", lambda e: self.destroy())
         close_btn.bind("<Enter>", lambda e: close_btn.config(fg=BAD))
@@ -348,14 +432,14 @@ class StatsOverlay(tk.Toplevel):
         # Stats Content Body
         body = tk.Frame(container, bg=SURFACE)
         body.pack(fill="both", expand=True, padx=12, pady=(2, 12))
-        
+
         tk.Label(body, text="TOTAL CHESTS", bg=SURFACE, fg=MUTED, font=font(7, "bold")).pack(anchor="w")
         self.lbl_total = tk.Label(body, text="0", bg=SURFACE, fg=ACCENT, font=font(24, "bold"))
         self.lbl_total.pack(anchor="w")
-        
+
         self.lbl_today = tk.Label(body, text="Today: 0", bg=SURFACE, fg=TEXT, font=font(9))
         self.lbl_today.pack(anchor="w", pady=(1, 0))
-        
+
         self.lbl_token = tk.Label(body, text="Token Chance: -", bg=SURFACE, fg=VIOLET, font=font(9, "bold"))
         self.lbl_token.pack(anchor="w", pady=(1, 4))
 
@@ -365,35 +449,43 @@ class StatsOverlay(tk.Toplevel):
         self.lbl_session = tk.Label(body, text="Session Matches: 0", bg=SURFACE, fg=TEXT, font=font(9))
         self.lbl_session.pack(anchor="w", pady=(1, 0))
 
-        self.lbl_last_match = tk.Label(body, text="Last Match: None", bg=SURFACE, fg=MUTED, font=font(8), wraplength=200, justify="left")
+        self.lbl_last_match = tk.Label(body, text="Last Match: None", bg=SURFACE, fg=MUTED, font=font(8),
+                                       wraplength=210, justify="left")
         self.lbl_last_match.pack(anchor="w", pady=(2, 0))
 
         self.update_idletasks()
-        w_w = 230
-        w_h = 210
+        w_w = max(230, int(230 * FONT_SCALE))
+        w_h = max(210, int(210 * FONT_SCALE))
         x = self.winfo_screenwidth() - w_w - 40
         y = 40
         self.geometry(f"{w_w}x{w_h}+{x}+{y}")
         self.update_stats()
 
+    def set_opacity(self, pct):
+        try:
+            v = max(30, min(100, int(pct))) / 100
+        except (TypeError, ValueError):
+            v = 0.9
+        self.attributes("-alpha", v)
+
     def toggle_click_through(self):
         """Toggle the window between interactive (movable/closable) and click-through (gameplay mode)."""
         try:
             hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, -20) # GWL_EXSTYLE
-            
+            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
+
             if self.is_interactive:
                 # Enable click-through: Add WS_EX_TRANSPARENT (0x00000020) and keep WS_EX_LAYERED
                 ctypes.windll.user32.SetWindowLongW(hwnd, -20, ex_style | 0x00000020 | 0x00080000)
                 self.is_interactive = False
-                self.lock_btn.config(text="🔒", fg=WARN)
-                # Change header cursor back to default since it's locked
-                self.winfo_children()[0].winfo_children()[0].master.config(cursor="")
+                self.lock_btn.config(text="\U0001F512", fg=WARN)
+                self.header.config(cursor="")
             else:
                 # Disable click-through: Remove WS_EX_TRANSPARENT
                 ctypes.windll.user32.SetWindowLongW(hwnd, -20, ex_style & ~0x00000020)
                 self.is_interactive = True
-                self.lock_btn.config(text="🔓", fg=MUTED)
+                self.lock_btn.config(text="\U0001F513", fg=MUTED)
+                self.header.config(cursor="fleur")
         except Exception:
             pass
 
@@ -417,7 +509,7 @@ class StatsOverlay(tk.Toplevel):
         total = sum(days.values())
         today = days.get(today_key(), 0)
         matches_count = self.store.matches_counted()
-        
+
         self.lbl_total.config(text=f"{total:,}")
         self.lbl_today.config(text=f"Today: {today:,}")
         self.lbl_token.config(text=f"Token Chance: {fmt_pct(token_chance(total))}" if total > 0 else "Token Chance: -")
@@ -429,12 +521,15 @@ class StatsOverlay(tk.Toplevel):
             if r.get("ok"):
                 n = self.store.replay_count(r)
                 time_str = r.get('time', '')
-                self.lbl_last_match.config(text=f"Last ({time_str}): {n} chests ({r.get('opened',0)}op, {r.get('destroyed',0)}dst)", fg=TEXT)
+                detail = f"{r.get('opened', 0)}op, {r.get('destroyed', 0)}dst"
+                team = self.store.replay_team(r)
+                if team:
+                    detail += f", +{team} team"
+                self.lbl_last_match.config(text=f"Last ({time_str}): {n} chests ({detail})", fg=TEXT)
             else:
                 self.lbl_last_match.config(text="Last Match: Error reading", fg=BAD)
         else:
             self.lbl_last_match.config(text="Last Match: None yet", fg=MUTED)
-
 
 # ---------------------------------------------------------------- C# replay reader
 
@@ -503,6 +598,7 @@ public class ChestInfo
     public double[]? Loc { get; set; }
     public double DistMine { get; set; } = -1;
     public bool Duplicate { get; set; }
+    public bool DuplicateTeam { get; set; }
     public bool AsDestroyed { get; set; }
     public bool Far { get; set; }
 }
@@ -567,6 +663,14 @@ public class ChestReader : ReplayReader
     private readonly Dictionary<uint, (float T, double[] L)> _spawn = new();
     private readonly HashSet<uint> _lootSeen = new();
     public readonly Dictionary<uint, uint> PawnToState = new();
+    public readonly Dictionary<uint, int> StateTeam = new();
+    public readonly Dictionary<string, List<string>> PlayerStateProps = new();
+    public int PlayerStateExports;
+    public readonly Dictionary<uint, Dictionary<string, string>> StateInfo = new();
+    public List<string> PlayerDataProps = new();
+    public List<string> PlayerDump = new();
+    public int PlayerDataCount;
+    public int? MyTeamIndex;
     public readonly Dictionary<uint, ChestInfo> Chests = new();
     public readonly List<(uint Pawn, float T)> Searches = new();
     public readonly Dictionary<uint, List<(float T, double X, double Y, double Z)>> Positions = new();
@@ -704,6 +808,10 @@ public class ChestReader : ReplayReader
                 HandleChest(channelIndex, c, null);
                 break;
 
+            case INetFieldExportGroup ps when IsPlayerStateLike(ps.GetType()):
+                ReadTeam(channelIndex, ps);
+                break;
+
             case INetFieldExportGroup other when IsChestLike(other.GetType()):
                 var adapted = AdaptChest(other, out var adaptedType);
                 if (adapted != null)
@@ -719,6 +827,236 @@ public class ChestReader : ReplayReader
     public bool UsedPawnFallback, FarFilterSkipped;
     public int FarDiscarded;
     private readonly Dictionary<Type, string?> _chestPathByType = new();
+
+    private static bool IsPlayerStateLike(Type t) =>
+        t.Name.Contains("PlayerState", StringComparison.OrdinalIgnoreCase) &&
+        !t.Name.Contains("Pawn", StringComparison.OrdinalIgnoreCase);
+
+    // Remember which team each player state belongs to (read by reflection so it works with any reader version).
+    private void ReadTeam(uint channelIndex, INetFieldExportGroup g)
+    {
+        PlayerStateExports++;
+        var t = g.GetType();
+        if (!PlayerStateProps.ContainsKey(t.Name))
+        {
+            try { PlayerStateProps[t.Name] = t.GetProperties(BindingFlags.Instance | BindingFlags.Public).Select(p => p.Name).Take(60).ToList(); }
+            catch { }
+        }
+        if (!_channelActor.TryGetValue(channelIndex, out var id)) return;
+        foreach (var p in t.GetProperties(BindingFlags.Instance | BindingFlags.Public))
+        {
+            if (!p.CanRead || p.GetIndexParameters().Length != 0) continue;
+            var isTeam = p.Name.Equals("TeamIndex", StringComparison.OrdinalIgnoreCase);
+            if (!isTeam && !InfoProps.Contains(p.Name) && !LooksLikeInfo(p.Name)) continue;
+            object? v;
+            try { v = p.GetValue(g); } catch { continue; }
+            if (v == null) continue;
+            if (isTeam) { try { StateTeam[id] = Convert.ToInt32(v); } catch { } continue; }
+            if (v is string || v.GetType().IsPrimitive)
+            {
+                var sv = Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture);
+                if (string.IsNullOrWhiteSpace(sv)) continue;
+                if (!StateInfo.TryGetValue(id, out var d)) StateInfo[id] = d = new Dictionary<string, string>();
+                d[p.Name] = sv;
+            }
+        }
+    }
+
+    // Any property that looks like a name or an id is remembered, so players can still be matched
+    // when the library calls the name something unexpected.
+    private static bool LooksLikeInfo(string n) =>
+        n.Contains("Name", StringComparison.OrdinalIgnoreCase) ||
+        n.Contains("UniqueId", StringComparison.OrdinalIgnoreCase) ||
+        n.Contains("EpicId", StringComparison.OrdinalIgnoreCase) ||
+        n.Contains("PlayerId", StringComparison.OrdinalIgnoreCase);
+
+    private static string? AnyName(object x)
+    {
+        foreach (var p in x.GetType().GetProperties())
+        {
+            if (p.PropertyType != typeof(string) || !p.Name.Contains("Name", StringComparison.OrdinalIgnoreCase)) continue;
+            try { var s = Str(p.GetValue(x)); if (s != null) return s; } catch { }
+        }
+        return null;
+    }
+
+    private bool StateHasId(uint state, string id) =>
+        StateInfo.TryGetValue(state, out var d) &&
+        d.Any(kv => kv.Key.Contains("Id", StringComparison.OrdinalIgnoreCase) &&
+                    (kv.Value.Equals(id, StringComparison.OrdinalIgnoreCase) ||
+                     (id.Length >= 8 && kv.Value.Contains(id, StringComparison.OrdinalIgnoreCase))));
+
+    private static readonly HashSet<string> InfoProps = new(StringComparer.OrdinalIgnoreCase)
+    { "PlayerNamePrivate", "PlayerNameCustomOverride", "PlayerName", "PlayerID", "bIsABot", "bIsBot" };
+
+    private static object? GetProp(object? o, string name)
+    {
+        if (o == null) return null;
+        try
+        {
+            return o.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase)?.GetValue(o);
+        }
+        catch { return null; }
+    }
+
+    private static string? Str(object? o)
+    {
+        var s = o?.ToString();
+        return string.IsNullOrWhiteSpace(s) ? null : s;
+    }
+
+    // The character can be a plain string or an item object; turn either into text.
+    // Numeric-only values (network GUIDs) are skipped because they cannot name a skin.
+    private static string? Flat(object? o)
+    {
+        if (o == null) return null;
+        if (o is string s) return Str(s);
+        foreach (var n in new[] { "Name", "AssetName", "Path", "PathName", "Value" })
+        {
+            var t = Str(GetProp(o, n));
+            if (t != null && !t.All(char.IsDigit)) return t;
+        }
+        var whole = Str(o);
+        return whole != null && !whole.All(char.IsDigit) ? whole : null;
+    }
+
+    private static string CosmeticId(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        var i = raw.IndexOf("CID_", StringComparison.OrdinalIgnoreCase);
+        if (i >= 0)
+        {
+            var j = i;
+            while (j < raw.Length && (char.IsLetterOrDigit(raw[j]) || raw[j] == '_')) j++;
+            return raw.Substring(i, j - i);
+        }
+        return raw.Split(new[] { '/', '.', (char)39 }).LastOrDefault(x => x.Length > 0) ?? "";
+    }
+
+    private sealed class PlayerRow
+    {
+        public uint State;
+        public bool Me, Bot;
+        public string Name = "", Skin = "";
+        public int Opened, Destroyed;
+    }
+
+    private sealed class PdRow
+    {
+        public string Name = "", Skin = "", Id = "", Raw = "";
+        public int? Team;
+        public bool Bot, Used;
+    }
+
+    private string StateName(uint state)
+    {
+        if (!StateInfo.TryGetValue(state, out var d)) return "";
+        foreach (var k in new[] { "PlayerNameCustomOverride", "PlayerNamePrivate", "PlayerName" })
+            if (d.TryGetValue(k, out var v) && !string.IsNullOrWhiteSpace(v)) return v;
+        foreach (var kv in d)
+            if (kv.Key.Contains("Name", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(kv.Value))
+                return kv.Value;
+        return "";
+    }
+
+    // One entry for me and one for every teammate: name, skin id and how many chests each of us opened/broke.
+    public List<object> BuildPlayers(object? replay, List<ChestInfo> mine, List<ChestInfo> team)
+    {
+        var data = new List<PdRow>();
+        try
+        {
+            if (GetProp(replay, "PlayerData") is System.Collections.IEnumerable en)
+                foreach (var x in en)
+                {
+                    if (x == null) continue;
+                    if (PlayerDataProps.Count == 0)
+                        PlayerDataProps = x.GetType().GetProperties().Select(p => p.Name).Take(40).ToList();
+                    PlayerDataCount++;
+                    var raw = Flat(GetProp(GetProp(x, "Cosmetics"), "Character"));
+                    var row = new PdRow
+                    {
+                        Name = Str(GetProp(x, "PlayerNameCustomOverride")) ?? Str(GetProp(x, "PlayerName"))
+                               ?? Str(GetProp(x, "PlayerNamePrivate")) ?? AnyName(x) ?? "",
+                        Id = Str(GetProp(x, "EpicId")) ?? Str(GetProp(x, "PlayerId"))
+                             ?? Str(GetProp(x, "PlatformUniqueId")) ?? "",
+                        Raw = raw ?? "",
+                        Skin = CosmeticId(raw),
+                        Bot = GetProp(x, "IsBot") is bool b && b,
+                    };
+                    try { var tv = GetProp(x, "TeamIndex"); if (tv != null) row.Team = Convert.ToInt32(tv); } catch { }
+                    data.Add(row);
+                }
+        }
+        catch (Exception e) { SettingsLog.Add("player data error: " + e.Message); }
+
+        // Raw dump so a failed match can be diagnosed from "Save diagnostics".
+        PlayerDump.Clear();
+        foreach (var d in data.Take(40))
+            PlayerDump.Add($"data name='{d.Name}' id='{d.Id}' team={d.Team?.ToString() ?? "?"} char='{d.Raw}' skin='{d.Skin}'");
+        foreach (var kv in StateInfo.Take(40))
+            PlayerDump.Add($"state {kv.Key} team={(StateTeam.TryGetValue(kv.Key, out var tt) ? tt.ToString() : "?")} "
+                           + string.Join(", ", kv.Value.Select(p => p.Key + "=" + p.Value)));
+
+        var rows = new Dictionary<uint, PlayerRow>();
+        if (MyTeamIndex.HasValue)
+            foreach (var kv in StateTeam.Where(kv => kv.Value == MyTeamIndex.Value))
+                rows[kv.Key] = new PlayerRow { State = kv.Key, Me = Recorder.HasValue && Recorder.Value == kv.Key };
+        if (!rows.Values.Any(r => r.Me))
+        {
+            var meRow = new PlayerRow { Me = true };
+            if (Recorder.HasValue) { meRow.State = Recorder.Value; rows[Recorder.Value] = meRow; }
+            else rows[0] = meRow;
+        }
+        foreach (var r in rows.Values) r.Name = StateName(r.State);
+
+        var me = rows.Values.First(r => r.Me);
+        foreach (var c in mine) { if (c.AsDestroyed) me.Destroyed++; else me.Opened++; }
+        foreach (var c in team)
+            if (PawnToState.TryGetValue(c.Owner, out var st) && rows.TryGetValue(st, out var row2))
+            {
+                if (c.AsDestroyed) row2.Destroyed++; else row2.Opened++;
+            }
+
+        var matched = 0;
+        var unmatched = new List<PlayerRow>();
+        foreach (var r in rows.Values)
+        {
+            PdRow? d = null;
+            if (r.Name.Length > 0)
+                d = data.FirstOrDefault(x => !x.Used && x.Name.Equals(r.Name, StringComparison.OrdinalIgnoreCase));
+            if (d == null && r.State != 0)
+                d = data.FirstOrDefault(x => !x.Used && x.Id.Length > 0 && StateHasId(r.State, x.Id));
+            if (d == null) { unmatched.Add(r); continue; }
+            d.Used = true; r.Skin = d.Skin; r.Bot = d.Bot; matched++;
+            if (r.Name.Length == 0) r.Name = d.Name;
+        }
+
+        // Last resort: exactly one player left without a match and exactly one unused entry on my team.
+        if (MyTeamIndex.HasValue && unmatched.Count == 1)
+        {
+            var left = data.Where(x => !x.Used && x.Team == MyTeamIndex.Value).ToList();
+            if (left.Count == 1)
+            {
+                left[0].Used = true;
+                unmatched[0].Skin = left[0].Skin; unmatched[0].Bot = left[0].Bot;
+                if (unmatched[0].Name.Length == 0) unmatched[0].Name = left[0].Name;
+                matched++; unmatched.Clear();
+            }
+        }
+
+        var extra = new List<PlayerRow>();
+        if (matched > 0 && unmatched.Count == 0 && MyTeamIndex.HasValue)
+            foreach (var d in data.Where(x => !x.Used && x.Team == MyTeamIndex.Value))
+                extra.Add(new PlayerRow { Name = d.Name, Skin = d.Skin, Bot = d.Bot });
+
+        return rows.Values.Concat(extra)
+            .OrderByDescending(r => r.Me).ThenByDescending(r => r.Opened + r.Destroyed).ThenBy(r => r.Name)
+            .Select(r => (object)new
+            {
+                name = r.Name, me = r.Me, skin = r.Skin, bot = r.Bot,
+                opened = r.Opened, destroyed = r.Destroyed, chests = r.Opened + r.Destroyed,
+            }).ToList();
+    }
 
     private void HandleChest(uint channelIndex, Chest c, string? typeName)
     {
@@ -835,6 +1173,25 @@ public class ChestReader : ReplayReader
     public bool IsMine(uint pawn) =>
         (Recorder.HasValue && PawnToState.TryGetValue(pawn, out var s) && s == Recorder.Value) || ExtraMyPawns.Contains(pawn);
 
+    // A teammate is any pawn that is not mine but whose player state is on my team.
+    public bool IsTeammate(uint pawn)
+    {
+        if (MyTeamIndex == null || IsMine(pawn)) return false;
+        return PawnToState.TryGetValue(pawn, out var s) && StateTeam.TryGetValue(s, out var t) && t == MyTeamIndex.Value;
+    }
+
+    private int? ComputeMyTeam()
+    {
+        if (Recorder.HasValue && StateTeam.TryGetValue(Recorder.Value, out var t)) return t;
+        foreach (var p in Positions.Keys.Where(IsMine))
+            if (PawnToState.TryGetValue(p, out var s) && StateTeam.TryGetValue(s, out var t2)) return t2;
+        return null;
+    }
+
+    // Proximity guesses are too unreliable to credit a chest to a teammate, so they are left out.
+    public bool CountsForTeam(ChestInfo c) =>
+        (c.Opened || c.AsDestroyed) && c.Owner != 0 && IsTeammate(c.Owner) && c.Method != "proximity" && !c.DuplicateTeam;
+
     private void DetectMyPawns()
     {
         foreach (var kv in Positions)
@@ -861,9 +1218,27 @@ public class ChestReader : ReplayReader
     private bool HasMySearch(ChestInfo c) =>
         Searches.Any(s => IsMine(s.Pawn) && s.T <= c.Time + 0.3f && s.T >= c.Time - 3.5f);
 
+    private void Dedupe(List<ChestInfo> list, Func<ChestInfo, bool> isDup, Action<ChestInfo> setDup)
+    {
+        for (var i = 0; i < list.Count; i++)
+        {
+            if (isDup(list[i])) continue;
+            for (var j = i + 1; j < list.Count; j++)
+            {
+                var a = list[i]; var b = list[j];
+                if (isDup(b)) continue;
+                if (b.Time - a.Time > 10f) break;
+                var sameSpot = a.Loc != null && b.Loc != null && Dist(a.Loc, b.Loc) < 350;
+                var sameMoment = (a.Loc == null || b.Loc == null) && a.Type == b.Type && b.Time - a.Time < 1.5f;
+                if (sameSpot || sameMoment) setDup(b);
+            }
+        }
+    }
+
     public void Resolve()
     {
         DetectMyPawns();
+        MyTeamIndex = ComputeMyTeam();
 
         foreach (var c in Chests.Values)
         {
@@ -931,20 +1306,11 @@ public class ChestReader : ReplayReader
             if (near != 0) { c.Owner = near; c.Method = "proximity"; }
         }
 
-        var list = Chests.Values.Where(x => x.Owner != 0 && IsMine(x.Owner)).OrderBy(x => x.Time).ToList();
-        for (var i = 0; i < list.Count; i++)
-        {
-            if (list[i].Duplicate) continue;
-            for (var j = i + 1; j < list.Count; j++)
-            {
-                var a = list[i]; var b = list[j];
-                if (b.Duplicate) continue;
-                if (b.Time - a.Time > 10f) break;
-                var sameSpot = a.Loc != null && b.Loc != null && Dist(a.Loc, b.Loc) < 350;
-                var sameMoment = (a.Loc == null || b.Loc == null) && a.Type == b.Type && b.Time - a.Time < 1.5f;
-                if (sameSpot || sameMoment) b.Duplicate = true;
-            }
-        }
+        Dedupe(Chests.Values.Where(x => x.Owner != 0 && IsMine(x.Owner)).OrderBy(x => x.Time).ToList(),
+               x => x.Duplicate, x => x.Duplicate = true);
+
+        foreach (var g in Chests.Values.Where(x => x.Owner != 0 && IsTeammate(x.Owner)).GroupBy(x => x.Owner))
+            Dedupe(g.OrderBy(x => x.Time).ToList(), x => x.DuplicateTeam, x => x.DuplicateTeam = true);
     }
 }
 
@@ -1028,7 +1394,7 @@ public static class Program
     private static string Line(ChestReader r, ChestInfo c)
     {
         var t = (int)c.Time;
-        var who = c.Owner == 0 ? "none" : r.IsMine(c.Owner) ? "ME" : "other";
+        var who = c.Owner == 0 ? "none" : r.IsMine(c.Owner) ? "ME" : r.IsTeammate(c.Owner) ? "TEAM" : "other";
         var state = c.AsDestroyed ? "destroyed" : c.Opened ? "opened" : "-";
         return $"{t / 60:00}:{t % 60:00} {c.Type} {state} by={who} via={(c.Method == "" ? "-" : c.Method)} " +
                $"dist={(c.DistMine < 0 ? "?" : ((int)c.DistMine).ToString())}" + (c.Duplicate ? " DUP" : "") + (c.Far ? " FAR" : "");
@@ -1043,6 +1409,8 @@ public static class Program
         var mine = reader.Chests.Values
             .Where(c => (c.Opened || c.AsDestroyed) && c.Owner != 0 && reader.IsMine(c.Owner) && !c.Duplicate)
             .ToList();
+        var team = reader.Chests.Values.Where(reader.CountsForTeam).ToList();
+        var players = reader.BuildPlayers(replay, mine, team);
 
         return new
         {
@@ -1052,6 +1420,11 @@ public static class Program
             mine = mine.Count,
             opened = mine.Count(c => !c.AsDestroyed),
             destroyed = mine.Count(c => c.AsDestroyed),
+            team = team.Count,
+            team_opened = team.Count(c => !c.AsDestroyed),
+            team_destroyed = team.Count(c => c.AsDestroyed),
+            team_known = reader.MyTeamIndex.HasValue,
+            players,
             by_type = mine.GroupBy(c => c.Type).ToDictionary(g => g.Key, g => g.Count()),
             chest_groups = reader.Groups.Where(LooksLikeChest).OrderBy(g => g).ToList(),
             recorder_found = reader.Recorder.HasValue,
@@ -1074,6 +1447,10 @@ public static class Program
                 searches = reader.Searches.Count,
                 loot = reader.Loot.Count,
                 chest_groups = reader.Groups.Count(LooksLikeChest),
+                player_state_exports = reader.PlayerStateExports,
+                states_with_team = reader.StateTeam.Count,
+                my_team_index = reader.MyTeamIndex,
+                team_pawns = reader.Positions.Keys.Count(reader.IsTeammate),
             },
             detail = reader.Chests.Values.Where(c => c.Opened || c.Destroyed).OrderBy(c => c.Time)
                          .Take(30).Select(c => Line(reader, c)).ToList(),
@@ -1086,6 +1463,10 @@ public static class Program
                                       .ToDictionary(kv => kv.Key, kv => kv.Value),
                 chest_group_props = reader.GroupProps.Take(14).ToDictionary(kv => kv.Key.Substring(kv.Key.LastIndexOf('/') + 1),
                                                                             kv => kv.Value.Take(40).ToList()),
+                player_state_props = reader.PlayerStateProps,
+                player_data_props = reader.PlayerDataProps,
+                player_data_count = reader.PlayerDataCount,
+                player_dump = reader.PlayerDump,
                 library_chest_types = LibraryChestTypes(),
                 replay_members = Members(replay),
             },
@@ -1142,6 +1523,46 @@ def dotnet_paths():
     return d, os.path.join(d, "dotnet.exe")
 
 
+# ---------------------------------------------------------------- update checker
+
+def parse_version(v):
+    nums = [int(n) for n in re.findall(r"\d+", str(v or ""))[:4]]
+    return tuple(nums + [0] * (4 - len(nums)))
+
+
+def _http_get(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "ChestTracker"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return r.read().decode("utf-8", errors="replace")
+
+
+def fetch_latest_version():
+    """Newest version published on GitHub -> (version, url), or None if nothing is published.
+
+    Looks at APP_VERSION in the script on the main branch and at the latest GitHub Release (if any)."""
+    found, errors = [], []
+    try:
+        m = re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', _http_get(RAW_SCRIPT), re.M)
+        if m:
+            found.append((m.group(1), REPO_URL))
+    except Exception as e:
+        errors.append(e)
+    try:
+        d = json.loads(_http_get(RELEASE_API))
+        if d.get("tag_name"):
+            found.append((d["tag_name"], d.get("html_url") or REPO_URL))
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            errors.append(e)
+    except Exception as e:
+        errors.append(e)
+    if found:
+        return max(found, key=lambda f: parse_version(f[0]))
+    if errors:
+        raise errors[0]
+    return None
+
+
 # ---------------------------------------------------------------- data store
 
 class Store:
@@ -1149,8 +1570,10 @@ class Store:
         self.lock = threading.Lock()
         self.manual, self.replays = {}, {}
         self.reader_version = 0
-        self.settings = {"count_destroyed": True, "delete_days": 3, "chest_types": [], "help_seen": False,
-                         "theme": "pirate", "notify": True}
+        self.settings = {"count_destroyed": True, "count_team": True, "delete_days": 3, "chest_types": [],
+                         "help_seen": False, "theme": "pirate", "notify": True,
+                         "custom_colors": {}, "font_family": "Segoe UI", "font_pct": 100,
+                         "logo": "Default", "overlay_opacity": 90, "check_updates": True}
         try:
             with open(DATA_FILE, encoding="utf-8") as f:
                 d = json.load(f)
@@ -1209,10 +1632,26 @@ class Store:
         with self.lock:
             return {k: dict(v) for k, v in self.replays.items()}
 
-    def replay_count(self, r):
+    def replay_mine(self, r):
+        """Chests the recording player opened/broke in this match."""
         if not r.get("ok"):
             return 0
         return int(r.get("chests", 0)) if self.settings.get("count_destroyed", True) else int(r.get("opened", 0))
+
+    def replay_team_raw(self, r):
+        """Teammates' chests in this match, whether or not they are being added to the total."""
+        if not r.get("ok"):
+            return 0
+        if self.settings.get("count_destroyed", True):
+            return int(r.get("team", 0))
+        return int(r.get("team_opened", 0))
+
+    def replay_team(self, r):
+        """Teammates' chests that are actually added to the total (0 when the setting is off)."""
+        return self.replay_team_raw(r) if self.settings.get("count_team", True) else 0
+
+    def replay_count(self, r):
+        return self.replay_mine(r) + self.replay_team(r)
 
     def days(self):
         with self.lock:
@@ -1468,11 +1907,17 @@ class Worker(threading.Thread):
                     if seen is None or new_types & set(seen):
                         v["pending"] = True
                         self.store.set_replay(k, v)
+            ok = bool(r.get("ok"))
             info = {
-                "ok": bool(r.get("ok")),
-                "chests": int(r.get("mine", 0)) if r.get("ok") else 0,
+                "ok": ok,
+                "chests": int(r.get("mine", 0)) if ok else 0,
                 "opened": int(r.get("opened", 0)),
                 "destroyed": int(r.get("destroyed", 0)),
+                "team": int(r.get("team", 0)) if ok else 0,
+                "team_opened": int(r.get("team_opened", 0)) if ok else 0,
+                "team_destroyed": int(r.get("team_destroyed", 0)) if ok else 0,
+                "team_known": bool(r.get("team_known")),
+                "players": r.get("players") or [],
                 "day": dt.date.fromtimestamp(mtime).isoformat(),
                 "time": dt.datetime.fromtimestamp(mtime).strftime("%H:%M"),
                 "mtime": mtime,
@@ -1551,13 +1996,13 @@ def desktop_notify(title, text, fallback):
 
 # ---------------------------------------------------------------- UI building blocks
 
-def dark_titlebar(win):
+def dark_titlebar(win, dark=True):
     if sys.platform != "win32":
         return
     try:
         win.update_idletasks()
         hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
-        val = ctypes.c_int(1)
+        val = ctypes.c_int(1 if dark else 0)
         for attr in (20, 19):
             if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val)) == 0:
                 break
@@ -1582,7 +2027,7 @@ def flat_button(parent, text, command, primary=False, width=None):
 
 class NavButton(tk.Label):
     def __init__(self, parent, text, command):
-        super().__init__(parent, text=text, bg=BG, fg=MUTED, font=font(11, "bold"), padx=px(14), pady=px(8),
+        super().__init__(parent, text=text, bg=BG, fg=MUTED, font=font(11, "bold"), padx=px(12), pady=px(8),
                          cursor="hand2")
         self.command = command
         self.active = False
@@ -1595,19 +2040,214 @@ class NavButton(tk.Label):
         self.config(fg=ACCENT if on else MUTED)
 
 
+class SkinCache:
+    """Looks up a skin's name and icon (cached on disk) so the match window can show it."""
+
+    def __init__(self):
+        self.mem, self.busy, self.lock = {}, {}, threading.Lock()
+
+    def get(self, cid):
+        with self.lock:
+            return self.mem.get(cid)
+
+    def fetch(self, cid, done):
+        if not cid or not re.fullmatch(r"[A-Za-z0-9_\-]+", cid):
+            with self.lock:
+                self.mem[cid] = {"name": cid or "Unknown", "icon": None}
+            done()
+            return
+        with self.lock:
+            if cid in self.mem:
+                ready = True
+            elif cid in self.busy:
+                self.busy[cid].append(done)
+                return
+            else:
+                self.busy[cid] = [done]
+                ready = False
+        if ready:
+            done()
+            return
+        threading.Thread(target=self._load, args=(cid,), daemon=True).start()
+
+    def _load(self, cid):
+        meta = {"name": cid, "icon": None}
+        try:
+            os.makedirs(SKIN_DIR, exist_ok=True)
+            jpath = os.path.join(SKIN_DIR, cid + ".json")
+            ipath = os.path.join(SKIN_DIR, cid + ".png")
+            if os.path.exists(jpath):
+                with open(jpath, encoding="utf-8") as f:
+                    meta = json.load(f)
+                if meta.get("icon") and not os.path.exists(meta["icon"]):
+                    meta["icon"] = None
+            else:
+                req = urllib.request.Request(SKIN_API + urllib.parse.quote(cid), headers={"User-Agent": "ChestTracker"})
+                data = json.loads(urllib.request.urlopen(req, timeout=15).read().decode("utf-8"))["data"]
+                images = data.get("images") or {}
+                url = images.get("smallIcon") or images.get("icon")
+                icon = None
+                if url:
+                    png = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "ChestTracker"}),
+                                                 timeout=20).read()
+                    with open(ipath, "wb") as f:
+                        f.write(png)
+                    icon = ipath
+                meta = {"name": data.get("name") or cid, "icon": icon}
+                with open(jpath, "w", encoding="utf-8") as f:
+                    json.dump(meta, f)
+        except Exception:
+            pass
+        with self.lock:
+            self.mem[cid] = meta
+            callbacks = self.busy.pop(cid, [])
+        for cb in callbacks:
+            try:
+                cb()
+            except Exception:
+                pass
+
+
+class MatchDetail(tk.Toplevel):
+    """Shows one match: you and every teammate with their chest count and skin."""
+
+    def __init__(self, parent, store, r, skins):
+        super().__init__(parent)
+        self.store, self.r, self.skins = store, r, skins
+        self.alive = True
+        self.q = queue.Queue()
+        self.slots = {}
+        self.images = {}
+        self.title("Match details")
+        self.configure(bg=BG)
+        self.geometry(f"{px(580)}x{px(540)}")
+        self.minsize(px(500), px(380))
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self._build()
+        dark_titlebar(self, luminance(BG) < 0.5)
+        self.after(250, self._poll)
+
+    def _close(self):
+        self.alive = False
+        self.destroy()
+
+    def _build(self):
+        r, st = self.r, self.store
+        head = tk.Frame(self, bg=BG)
+        head.pack(fill="x", padx=px(18), pady=(px(16), px(8)))
+        tk.Label(head, text=f"Match  {r.get('day', '')}  {r.get('time', '')}".strip(), bg=BG, fg=TEXT,
+                 font=font(14, "bold")).pack(anchor="w")
+        mine, team = st.replay_mine(r), st.replay_team_raw(r)
+        line = f"You: {mine}    Teammates: {team}    Added to your total: {st.replay_count(r)}"
+        if team and not st.setting("count_team"):
+            line += "   (teammates are switched off in Settings)"
+        tk.Label(head, text=line, bg=BG, fg=MUTED, font=font(10)).pack(anchor="w", pady=(2, 0))
+
+        outer = tk.Frame(self, bg=BG)
+        outer.pack(fill="both", expand=True, padx=px(18), pady=(0, px(16)))
+        cv = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(outer, orient="vertical", command=cv.yview)
+        inner = tk.Frame(cv, bg=BG)
+        win = cv.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.bind("<Configure>", lambda e: cv.itemconfigure(win, width=e.width))
+        cv.configure(yscrollcommand=sb.set)
+        cv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.bind("<MouseWheel>", lambda e: cv.yview_scroll(int(-e.delta / 120), "units"))
+
+        players = r.get("players") or []
+        if not players:
+            tk.Label(inner, text="No team details were saved for this match.\n"
+                                 "If the replay is still on disk, use Settings > Re-scan all.",
+                     bg=BG, fg=MUTED, font=font(10), justify="left").pack(anchor="w", pady=px(8))
+            return
+        for p in players:
+            self._player_row(inner, p)
+        if not r.get("team_known"):
+            tk.Label(inner, text="Your team could not be identified in this replay, so only your own chests are listed.",
+                     bg=BG, fg=WARN, font=font(9), wraplength=px(480), justify="left").pack(anchor="w", pady=px(4))
+
+    def _player_row(self, parent, p):
+        st = self.store
+        row = card(parent)
+        row.pack(fill="x", pady=(0, px(8)))
+        pname = p.get("name") or ("You" if p.get("me") else "Unknown player")
+        box = tk.Frame(row, bg=SURFACE2, width=px(64), height=px(64))
+        box.pack(side="left", padx=px(12), pady=px(12))
+        box.pack_propagate(False)
+        icon = tk.Label(box, bg=SURFACE2, fg=MUTED, text=(pname[:1].upper() or "?"), font=font(18, "bold"))
+        icon.pack(fill="both", expand=True)
+
+        mid = tk.Frame(row, bg=SURFACE)
+        mid.pack(side="left", fill="x", expand=True, pady=px(12))
+        top = tk.Frame(mid, bg=SURFACE)
+        top.pack(anchor="w")
+        tk.Label(top, text=pname, bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(side="left")
+        if p.get("me"):
+            tk.Label(top, text="  YOU", bg=SURFACE, fg=ACCENT, font=font(8, "bold")).pack(side="left")
+        elif p.get("bot"):
+            tk.Label(top, text="  BOT", bg=SURFACE, fg=MUTED, font=font(8, "bold")).pack(side="left")
+        cid = p.get("skin") or ""
+        skin = tk.Label(mid, text="Loading skin..." if cid else "Skin unknown", bg=SURFACE, fg=MUTED, font=font(9))
+        skin.pack(anchor="w")
+
+        opened, destroyed = int(p.get("opened", 0)), int(p.get("destroyed", 0))
+        n = opened + (destroyed if st.setting("count_destroyed") else 0)
+        right = tk.Frame(row, bg=SURFACE)
+        right.pack(side="right", padx=px(16))
+        tk.Label(right, text=f"{n:,}", bg=SURFACE, fg=ACCENT, font=font(24, "bold")).pack(anchor="e")
+        tk.Label(right, text=f"{opened} opened, {destroyed} broken", bg=SURFACE, fg=MUTED,
+                 font=font(8)).pack(anchor="e")
+        if cid:
+            self.slots.setdefault(cid, []).append((icon, skin))
+            self.skins.fetch(cid, lambda c=cid: self.q.put(c))
+
+    def _poll(self):
+        if not self.alive:
+            return
+        try:
+            while True:
+                self._apply(self.q.get_nowait())
+        except queue.Empty:
+            pass
+        self.after(250, self._poll)
+
+    def _apply(self, cid):
+        meta = self.skins.get(cid) or {}
+        name = meta.get("name") or cid
+        img = None
+        path = meta.get("icon")
+        if path and os.path.exists(path):
+            try:
+                img = tk.PhotoImage(file=path)
+                f = max(1, round(img.width() / px(64)))
+                if f > 1:
+                    img = img.subsample(f)
+                self.images[cid] = img
+            except tk.TclError:
+                img = None
+        for icon, skin in self.slots.get(cid, []):
+            skin.config(text=name)
+            if img is not None:
+                icon.config(image=img, text="")
+
+
 CREDITS_NAME = "hmr_abood"
 CREDITS_LINKS = (
     ("TikTok", "https://www.tiktok.com/@hmr_aboodyt"),
     ("GitHub", "https://github.com/Hmr-Abood"),
+    ("Project", REPO_URL),
 )
 
 HELP_TEXT = (
     "1. In Fortnite: Settings > Game > Replays > Record Replays (Battle Royale) = On.\n\n"
     "2. Keep Chest Tracker open (minimized is fine) and play.\n\n"
     "3. About 2 minutes after each match ends, its chests are added to your total and to today.\n\n"
-    "Counted: every chest you open and, if enabled, the chests you break. Chests opened by other "
-    "players are never counted.\n\n"
-    "Use the Stream Overlay feature in Settings to display live floating stats on top of your game!"
+    "Counted: every chest you open and, if enabled, the chests you break. Chests opened by your teammates "
+    "are added too (you can turn that off in Settings). Chests opened by enemies or other teams are never "
+    "counted.\n\n"
+    "Use the Customize tab to change the theme, colors, font and the live Stream Overlay."
 )
 
 
@@ -1619,17 +2259,22 @@ class App:
         self.root = root
         SCALE = max(1.0, root.winfo_fpixels("1i") / 96.0)
         self.store = Store()
-        apply_theme(self.store.setting("theme"))
+        self.skins = SkinCache()
+        self.match_win = None
+        self._apply_look()
         self.events = queue.Queue()
         self.last = None
         self.hover = None
         self.page_key = "dashboard"
         self.status_level = None
+        self.status_text = ""
         self.overlay_win = None
+        self.update_info = None
+        self._update_prompted = False
 
         root.title("Chest Tracker")
-        root.geometry(f"{px(900)}x{px(760)}")
-        root.minsize(px(820), px(690))
+        root.geometry(f"{px(960)}x{px(780)}")
+        root.minsize(px(920), px(700))
         self._build_ui()
 
         self.worker = Worker(self.store, self.events)
@@ -1639,10 +2284,19 @@ class App:
         self.refresh()
         root.after(200, self._pump)
         root.after(60000, self._minute)
-        dark_titlebar(root)
+        if start_worker and self.store.setting("check_updates"):
+            root.after(4000, lambda: self._check_updates(False))
+        dark_titlebar(root, luminance(BG) < 0.5)
         if start_worker and not self.store.setting("help_seen"):
             self.store.set_setting("help_seen", True)
             root.after(700, lambda: messagebox.showinfo("Welcome to Chest Tracker", HELP_TEXT, parent=self.root))
+
+    def _apply_look(self):
+        apply_theme(self.store.setting("theme"), self.store.setting("custom_colors"))
+        logo = self.store.setting("logo")
+        if logo and logo != "Default":
+            globals()["LOGO"] = logo
+        apply_fonts(self.store.setting("font_family"), self.store.setting("font_pct"))
 
     def _build_ui(self):
         self.root.configure(bg=BG)
@@ -1655,8 +2309,32 @@ class App:
         self._build_matches()
         self._build_milestones()
         self._build_settings()
+        self._build_customize()
         self._build_credits()
         self.show(self.page_key)
+
+    def _rebuild(self):
+        """Re-create the whole window so a new theme / font takes effect everywhere."""
+        had_overlay = bool(self.overlay_win and self.overlay_win.winfo_exists())
+        if had_overlay:
+            self.overlay_win.destroy()
+            self.overlay_win = None
+        self._apply_look()
+        for w in self.root.winfo_children():
+            if not isinstance(w, tk.Toplevel):
+                w.destroy()
+        self._build_ui()
+        self.refresh()
+        self._show_update_banner()
+        if had_overlay:
+            self.v_overlay.set(True)
+            self._toggle_overlay()
+        if self.status_level:
+            self._set_status(self.status_level, self.status_text)
+        dark_titlebar(self.root, luminance(BG) < 0.5)
+
+    def _rebuild_soon(self):
+        self.root.after(60, self._rebuild)
 
     def close(self):
         self.worker.stop()
@@ -1683,6 +2361,14 @@ class App:
         s.map("Dark.TCheckbutton", background=[("active", SURFACE)], indicatorcolor=[("selected", ACCENT)])
         s.configure("TSpinbox", fieldbackground=SURFACE2, background=SURFACE2, foreground=TEXT,
                     arrowcolor=TEXT, bordercolor=BORDER)
+        s.configure("TCombobox", fieldbackground=SURFACE2, background=SURFACE2, foreground=TEXT,
+                    arrowcolor=TEXT, bordercolor=BORDER, selectbackground=SURFACE2, selectforeground=TEXT)
+        s.map("TCombobox", fieldbackground=[("readonly", SURFACE2)], foreground=[("readonly", TEXT)])
+        s.configure("Horizontal.TScale", background=SURFACE, troughcolor=SURFACE2, bordercolor=BORDER)
+        self.root.option_add("*TCombobox*Listbox.background", SURFACE2)
+        self.root.option_add("*TCombobox*Listbox.foreground", TEXT)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", ON_ACCENT)
 
     def _build_header(self):
         h = tk.Frame(self.root, bg=BG)
@@ -1694,10 +2380,10 @@ class App:
         tk.Label(logo, text="Tracker", bg=BG, fg=ACCENT, font=font(16, "bold")).pack(side="left")
 
         nav = tk.Frame(h, bg=BG)
-        nav.pack(side="left", padx=px(26))
+        nav.pack(side="left", padx=px(20))
         self.nav = {}
         for key, label in (("dashboard", "Dashboard"), ("matches", "Matches"), ("milestones", "Milestones"),
-                           ("settings", "Settings"), ("credits", "Credits")):
+                           ("settings", "Settings"), ("customize", "Customize"), ("credits", "Credits")):
             b = NavButton(nav, label, lambda k=key: self.show(k))
             b.pack(side="left")
             self.nav[key] = b
@@ -1705,6 +2391,13 @@ class App:
         self.pill = tk.Label(h, text="\u25CF  Starting", bg=SURFACE, fg=MUTED, font=font(9, "bold"),
                              padx=px(12), pady=px(5))
         self.pill.pack(side="right")
+
+        # shown (packed) only when a newer version exists on GitHub
+        self.update_lbl = tk.Label(h, text="", bg=ACCENT, fg=ON_ACCENT, font=font(9, "bold"),
+                                   padx=px(12), pady=px(5), cursor="hand2")
+        self.update_lbl.bind("<Button-1>", lambda e: self._open_update())
+        self.update_lbl.bind("<Enter>", lambda e: self.update_lbl.config(bg=HOVER))
+        self.update_lbl.bind("<Leave>", lambda e: self.update_lbl.config(bg=ACCENT))
 
     def show(self, key):
         self.page_key = key
@@ -1789,12 +2482,15 @@ class App:
     def _build_matches(self):
         page = tk.Frame(self.body, bg=BG)
         self.pages["matches"] = page
+        tk.Label(page, text="Click a match to see your teammates, their chests and their skins", bg=BG, fg=MUTED,
+                 font=font(9)).pack(anchor="w", pady=(0, px(6)))
         c = card(page)
         c.pack(fill="both", expand=True)
-        cols = ("when", "total", "opened", "destroyed", "status")
+        cols = ("when", "total", "opened", "destroyed", "team", "status")
         self.tv = ttk.Treeview(c, columns=cols, show="headings")
-        spec = {"when": ("MATCH", 170, "w"), "total": ("CHESTS", 90, "e"), "opened": ("OPENED", 90, "e"),
-                "destroyed": ("DESTROYED", 110, "e"), "status": ("STATUS", 260, "w")}
+        spec = {"when": ("MATCH", 160, "w"), "total": ("CHESTS", 80, "e"), "opened": ("OPENED", 80, "e"),
+                "destroyed": ("DESTROYED", 100, "e"), "team": ("TEAMMATES", 100, "e"),
+                "status": ("STATUS", 240, "w")}
         for k, (t, w, a) in spec.items():
             self.tv.heading(k, text=t, anchor=a)
             self.tv.column(k, width=px(w), anchor=a, stretch=(k == "status"))
@@ -1804,12 +2500,15 @@ class App:
         sb.pack(side="right", fill="y")
         self.tv.tag_configure("bad", foreground=BAD)
         self.tv.tag_configure("wait", foreground=WARN)
+        self.tv.configure(cursor="hand2")
+        self.tv.bind("<ButtonRelease-1>", self._match_clicked)
 
     def fill_matches(self):
         self.tv.delete(*self.tv.get_children())
         items = sorted(self.store.replay_list().items(),
                        key=lambda kv: (kv[1].get("day", ""), kv[1].get("time", "")), reverse=True)
-        for _, r in items:
+        team_on = bool(self.store.setting("count_team"))
+        for rname, r in items:
             when = f"{r.get('day', '')}  {r.get('time', '')}".strip()
             tag = ""
             if r.get("pending"):
@@ -1818,13 +2517,34 @@ class App:
                 status, tag = f"Error: {r.get('error') or '?'}", "bad"
             elif not r.get("recorder_found", True):
                 status, tag = "Warning: recording player not found", "wait"
+            elif r.get("chests") or r.get("team"):
+                status = "OK"
+                if team_on and not r.get("team_known"):
+                    status, tag = "OK - team not detected", "wait"
             else:
-                status = "OK" if r.get("chests") else self._zero_reason(r)
+                status = self._zero_reason(r)
             if r.get("ok"):
-                nums = (self.store.replay_count(r), r.get("opened", 0), r.get("destroyed", 0))
+                team = self.store.replay_team_raw(r)
+                nums = (self.store.replay_count(r), r.get("opened", 0), r.get("destroyed", 0),
+                        team if team_on else f"({team})")
             else:
-                nums = ("-", "-", "-")
-            self.tv.insert("", "end", values=(when, *nums, status), tags=(tag,) if tag else ())
+                nums = ("-", "-", "-", "-")
+            self.tv.insert("", "end", iid=rname, values=(when, *nums, status), tags=(tag,) if tag else ())
+
+    def _match_clicked(self, e):
+        if self.tv.identify_region(e.x, e.y) != "cell":
+            return
+        iid = self.tv.identify_row(e.y)
+        if iid:
+            self._open_match(iid)
+
+    def _open_match(self, rname):
+        r = self.store.replay_list().get(rname)
+        if not r:
+            return
+        if self.match_win is not None and self.match_win.winfo_exists():
+            self.match_win.destroy()
+        self.match_win = MatchDetail(self.root, self.store, r, self.skins)
 
     @staticmethod
     def _zero_reason(r):
@@ -1945,7 +2665,7 @@ class App:
             row.pack(fill="x", padx=px(24), pady=(px(14), 0))
             tk.Label(row, text=label.upper(), bg=SURFACE, fg=MUTED, font=font(8, "bold"), width=8,
                      anchor="w").pack(side="left")
-            link = tk.Label(row, text=url, bg=SURFACE, fg=VIOLET, font=("Segoe UI", 11, "underline"),
+            link = tk.Label(row, text=url, bg=SURFACE, fg=VIOLET, font=font(11, "underline"),
                             cursor="hand2")
             link.pack(side="left")
             link.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
@@ -1965,6 +2685,10 @@ class App:
         ttk.Checkbutton(c1, text="Count destroyed chests (broken with the pickaxe or explosives)",
                         variable=self.v_destroyed, style="Dark.TCheckbutton",
                         command=self._destroyed_changed).pack(anchor="w", padx=px(18))
+        self.v_team = tk.BooleanVar(value=bool(self.store.setting("count_team")))
+        ttk.Checkbutton(c1, text="Also count my teammates' chests (duos, trios, squads)",
+                        variable=self.v_team, style="Dark.TCheckbutton",
+                        command=self._team_changed).pack(anchor="w", padx=px(18), pady=(px(6), 0))
         row = tk.Frame(c1, bg=SURFACE)
         row.pack(anchor="w", padx=px(18), pady=(px(10), px(4)))
         tk.Label(row, text="Delete counted replays after", bg=SURFACE, fg=TEXT, font=font(10)).pack(side="left")
@@ -1978,21 +2702,16 @@ class App:
 
         c_ui = card(page)
         c_ui.pack(fill="x", pady=(0, px(12)))
-        tk.Label(c_ui, text="Look and Alerts", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(
+        tk.Label(c_ui, text="Alerts", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(
             anchor="w", padx=px(18), pady=(px(14), px(6)))
-        self.v_pirate = tk.BooleanVar(value=self.store.setting("theme") == "pirate")
-        ttk.Checkbutton(c_ui, text="Pirate theme", variable=self.v_pirate, style="Dark.TCheckbutton",
-                        command=self._theme_changed).pack(anchor="w", padx=px(18))
-        
-        # --- OVERLAY TOGGLE ---
-        self.v_overlay = tk.BooleanVar(value=False)
-        ttk.Checkbutton(c_ui, text="Show In-Game / Stream Stats Overlay", variable=self.v_overlay,
-                        style="Dark.TCheckbutton", command=self._toggle_overlay).pack(anchor="w", padx=px(18), pady=(px(6), 0))
-
         self.v_notify = tk.BooleanVar(value=bool(self.store.setting("notify")))
         ttk.Checkbutton(c_ui, text="Show desktop notification when match is counted",
                         variable=self.v_notify, style="Dark.TCheckbutton",
-                        command=self._notify_changed).pack(anchor="w", padx=px(18), pady=(px(6), 0))
+                        command=self._notify_changed).pack(anchor="w", padx=px(18))
+        self.v_updates = tk.BooleanVar(value=bool(self.store.setting("check_updates")))
+        ttk.Checkbutton(c_ui, text="Check for a newer version when the app starts",
+                        variable=self.v_updates, style="Dark.TCheckbutton",
+                        command=self._updates_changed).pack(anchor="w", padx=px(18), pady=(px(6), 0))
         r_ui = tk.Frame(c_ui, bg=SURFACE)
         r_ui.pack(anchor="w", padx=px(18), pady=(px(10), px(14)))
         flat_button(r_ui, "Test notification",
@@ -2018,12 +2737,140 @@ class App:
         flat_button(r3, "Log", lambda: open_path(LOG_FILE)).pack(side="left")
         flat_button(r3, "Re-scan all", self._rescan).pack(side="left", padx=px(8))
         flat_button(r3, "Save diagnostics", self.save_report).pack(side="left")
+        flat_button(r3, "Check for updates", lambda: self._check_updates(True)).pack(side="left", padx=px(8))
 
         c4 = card(page)
         c4.pack(fill="x")
         tk.Label(c4, text="How it works", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(anchor="w", padx=px(18), pady=(px(14), px(4)))
         tk.Label(c4, text=HELP_TEXT, bg=SURFACE, fg=MUTED, font=font(9), justify="left", anchor="w",
-                 wraplength=px(720)).pack(anchor="w", padx=px(18), pady=(0, px(14)))
+                 wraplength=px(760)).pack(anchor="w", padx=px(18), pady=(0, px(14)))
+
+    # ------------------------------------------------------------ customize page
+
+    def _build_customize(self):
+        page = tk.Frame(self.body, bg=BG)
+        self.pages["customize"] = page
+        custom = self.store.setting("custom_colors") or {}
+
+        # theme presets
+        c1 = card(page)
+        c1.pack(fill="x", pady=(0, px(12)))
+        tk.Label(c1, text="Theme preset", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(
+            anchor="w", padx=px(18), pady=(px(14), px(8)))
+        row = tk.Frame(c1, bg=SURFACE)
+        row.pack(anchor="w", padx=px(18), pady=(0, px(14)))
+        current = self.store.setting("theme")
+        for name in THEMES:
+            flat_button(row, name.capitalize(), lambda n=name: self._set_preset(n),
+                        primary=(name == current and not custom)).pack(side="left", padx=(0, px(8)))
+
+        # individual colors
+        c2 = card(page)
+        c2.pack(fill="x", pady=(0, px(12)))
+        head = tk.Frame(c2, bg=SURFACE)
+        head.pack(fill="x", padx=px(18), pady=(px(14), px(8)))
+        tk.Label(head, text="Colors", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(side="left")
+        tk.Label(head, text="click a swatch to change it", bg=SURFACE, fg=MUTED, font=font(9)).pack(
+            side="left", padx=px(12))
+        flat_button(head, "Reset colors", self._reset_colors).pack(side="right")
+        grid = tk.Frame(c2, bg=SURFACE)
+        grid.pack(fill="x", padx=px(18), pady=(0, px(14)))
+        grid.columnconfigure(0, weight=1, uniform="col")
+        grid.columnconfigure(1, weight=1, uniform="col")
+        for i, (key, label) in enumerate(COLOR_LABELS):
+            cell = tk.Frame(grid, bg=SURFACE)
+            cell.grid(row=i // 2, column=i % 2, sticky="w", pady=px(3))
+            sw = tk.Label(cell, bg=globals()[key], width=4, cursor="hand2", highlightthickness=1,
+                          highlightbackground=BORDER)
+            sw.pack(side="left")
+            sw.bind("<Button-1>", lambda e, k=key: self._pick_color(k))
+            tk.Label(cell, text=label, bg=SURFACE, fg=TEXT, font=font(10)).pack(side="left", padx=px(10))
+            tk.Label(cell, text=globals()[key] + ("  (custom)" if key in custom else ""), bg=SURFACE,
+                     fg=MUTED, font=font(9)).pack(side="left")
+
+        # font, size, logo
+        c3 = card(page)
+        c3.pack(fill="x", pady=(0, px(12)))
+        tk.Label(c3, text="Text and logo", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(
+            anchor="w", padx=px(18), pady=(px(14), px(8)))
+        r3 = tk.Frame(c3, bg=SURFACE)
+        r3.pack(anchor="w", padx=px(18), pady=(0, px(14)))
+        tk.Label(r3, text="Font", bg=SURFACE, fg=TEXT, font=font(10)).pack(side="left")
+        self.v_font = tk.StringVar(value=self.store.setting("font_family") or "Segoe UI")
+        cb = ttk.Combobox(r3, values=FONT_CHOICES, textvariable=self.v_font, state="readonly", width=14)
+        cb.pack(side="left", padx=(px(8), px(18)))
+        cb.bind("<<ComboboxSelected>>", lambda e: self._look_changed())
+        tk.Label(r3, text="Text size", bg=SURFACE, fg=TEXT, font=font(10)).pack(side="left")
+        self.v_fpct = tk.StringVar(value=str(self.store.setting("font_pct") or 100))
+        sp = ttk.Spinbox(r3, from_=80, to=140, increment=5, width=5, textvariable=self.v_fpct,
+                         command=self._look_changed)
+        sp.pack(side="left", padx=(px(8), px(2)))
+        sp.bind("<Return>", lambda e: self._look_changed())
+        sp.bind("<FocusOut>", lambda e: self._look_changed())
+        tk.Label(r3, text="%", bg=SURFACE, fg=MUTED, font=font(9)).pack(side="left", padx=(0, px(18)))
+        tk.Label(r3, text="Logo", bg=SURFACE, fg=TEXT, font=font(10)).pack(side="left")
+        self.v_logo = tk.StringVar(value=self.store.setting("logo") or "Default")
+        lg = ttk.Combobox(r3, values=LOGO_CHOICES, textvariable=self.v_logo, state="readonly", width=8)
+        lg.pack(side="left", padx=px(8))
+        lg.bind("<<ComboboxSelected>>", lambda e: self._look_changed())
+
+        # overlay
+        c4 = card(page)
+        c4.pack(fill="x")
+        tk.Label(c4, text="Stream overlay", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(
+            anchor="w", padx=px(18), pady=(px(14), px(6)))
+        self.v_overlay = tk.BooleanVar(value=False)
+        ttk.Checkbutton(c4, text="Show In-Game / Stream Stats Overlay", variable=self.v_overlay,
+                        style="Dark.TCheckbutton", command=self._toggle_overlay).pack(anchor="w", padx=px(18))
+        r4 = tk.Frame(c4, bg=SURFACE)
+        r4.pack(anchor="w", padx=px(18), pady=(px(10), px(14)))
+        tk.Label(r4, text="Overlay opacity", bg=SURFACE, fg=TEXT, font=font(10)).pack(side="left")
+        self.v_opacity = tk.IntVar(value=int(self.store.setting("overlay_opacity") or 90))
+        sc = ttk.Scale(r4, from_=30, to=100, orient="horizontal", length=px(220), variable=self.v_opacity,
+                       command=self._opacity_live)
+        sc.pack(side="left", padx=px(10))
+        sc.bind("<ButtonRelease-1>", lambda e: self.store.set_setting("overlay_opacity", int(self.v_opacity.get())))
+        self.lbl_opacity = tk.Label(r4, text=f"{self.v_opacity.get()}%", bg=SURFACE, fg=MUTED, font=font(9))
+        self.lbl_opacity.pack(side="left")
+
+    def _set_preset(self, name):
+        self.store.set_setting("theme", name)
+        self.store.set_setting("custom_colors", {})
+        self._rebuild_soon()
+
+    def _reset_colors(self):
+        self.store.set_setting("custom_colors", {})
+        self._rebuild_soon()
+
+    def _pick_color(self, key):
+        rgb, hexv = colorchooser.askcolor(color=globals()[key], parent=self.root, title="Pick a color")
+        if not hexv:
+            return
+        custom = dict(self.store.setting("custom_colors") or {})
+        custom[key] = hexv.lower()
+        self.store.set_setting("custom_colors", custom)
+        self._rebuild_soon()
+
+    def _look_changed(self):
+        family = self.v_font.get() if self.v_font.get() in FONT_CHOICES else "Segoe UI"
+        try:
+            pct = max(80, min(140, int(self.v_fpct.get())))
+        except ValueError:
+            pct = int(self.store.setting("font_pct") or 100)
+        logo = self.v_logo.get() or "Default"
+        if (family, pct, logo) == (self.store.setting("font_family"), self.store.setting("font_pct"),
+                                   self.store.setting("logo")):
+            return
+        self.store.set_setting("font_family", family)
+        self.store.set_setting("font_pct", pct)
+        self.store.set_setting("logo", logo)
+        self._rebuild_soon()
+
+    def _opacity_live(self, value):
+        v = int(float(value))
+        self.lbl_opacity.config(text=f"{v}%")
+        if self.overlay_win and self.overlay_win.winfo_exists():
+            self.overlay_win.set_opacity(v)
 
     def _toggle_overlay(self):
         if self.v_overlay.get():
@@ -2034,15 +2881,64 @@ class App:
                 self.overlay_win.destroy()
                 self.overlay_win = None
 
-    def _theme_changed(self):
-        self.store.set_setting("theme", "pirate" if self.v_pirate.get() else "classic")
-        apply_theme(self.store.setting("theme"))
-        for w in self.root.winfo_children():
-            w.destroy()
-        self._build_ui()
-        self.refresh()
-        if self.status_level:
-            self._set_status(self.status_level, self.status_text)
+    # ------------------------------------------------------------ update checker
+
+    def _check_updates(self, manual=False):
+        def work():
+            try:
+                res, err = fetch_latest_version(), None
+            except Exception as e:
+                res, err = None, f"{type(e).__name__}: {e}"
+            self.events.put(("update", (res, err, manual)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update(self, res, err, manual):
+        if err:
+            if manual:
+                messagebox.showwarning("Chest Tracker", f"Could not check for updates.\n\n{err}", parent=self.root)
+            return
+        if not res:
+            if manual:
+                messagebox.showinfo("Chest Tracker", "No published version was found on GitHub yet.",
+                                    parent=self.root)
+            return
+        tag, url = res
+        if parse_version(tag) > parse_version(APP_VERSION):
+            self.update_info = (tag, url)
+            self._show_update_banner()
+            if manual or not self._update_prompted:
+                self._update_prompted = True
+                if messagebox.askyesno(
+                        "Update available",
+                        f"A newer version of Chest Tracker is available.\n\n"
+                        f"Your version: v{APP_VERSION}\nLatest version: {tag}\n\n"
+                        f"Open the download page now?", parent=self.root):
+                    webbrowser.open(url)
+        else:
+            self.update_info = None
+            self._show_update_banner()
+            if manual:
+                messagebox.showinfo("Chest Tracker", f"You are up to date (v{APP_VERSION}).", parent=self.root)
+
+    def _show_update_banner(self):
+        lbl = getattr(self, "update_lbl", None)
+        if lbl is None or not lbl.winfo_exists():
+            return
+        if self.update_info:
+            lbl.config(text=f"\u2B06  Update available: {self.update_info[0]}")
+            if not lbl.winfo_manager():
+                lbl.pack(side="right", padx=(0, px(10)), after=self.pill)
+        else:
+            lbl.pack_forget()
+
+    def _open_update(self):
+        if self.update_info:
+            webbrowser.open(self.update_info[1])
+
+    def _updates_changed(self):
+        self.store.set_setting("check_updates", bool(self.v_updates.get()))
+
+    # ------------------------------------------------------------ notifications
 
     def _notify_changed(self):
         self.store.set_setting("notify", bool(self.v_notify.get()))
@@ -2072,11 +2968,17 @@ class App:
     def _notify_match(self, r):
         n = self.store.replay_count(r)
         total = sum(self.store.days().values())
-        self._notify("Match counted", f"{n} chest{'s' if n != 1 else ''} this match  -  {total:,} total  -  "
+        team = self.store.replay_team(r)
+        extra = f" (incl. {team} from teammates)" if team else ""
+        self._notify("Match counted", f"{n} chest{'s' if n != 1 else ''} this match{extra}  -  {total:,} total  -  "
                                       f"token chance {fmt_pct(token_chance(total))}")
 
     def _destroyed_changed(self):
         self.store.set_setting("count_destroyed", bool(self.v_destroyed.get()))
+        self.refresh()
+
+    def _team_changed(self):
+        self.store.set_setting("count_team", bool(self.v_team.get()))
         self.refresh()
 
     def _days_changed(self):
@@ -2096,6 +2998,24 @@ class App:
         n_files = len([f for f in os.listdir(DEMOS) if f.lower().endswith(".replay")]) if have else 0
         lines = [f"Chest Tracker {APP_VERSION}  reader v{READER_VERSION}  {dt.datetime.now():%Y-%m-%d %H:%M}",
                  f"Replays folder exists: {have}   .replay files on disk: {n_files}", ""]
+        items = sorted(self.store.replay_list().items(), key=lambda kv: kv[1].get("mtime", 0), reverse=True)[:5]
+        lines.append("---- last matches (team detection) ----")
+        for name, r in items:
+            d = r.get("diag") or {}
+            lines.append(f"{name}: mine={r.get('chests')} team={r.get('team')} team_known={r.get('team_known')} "
+                         f"player_state_exports={d.get('player_state_exports')} "
+                         f"states_with_team={d.get('states_with_team')} my_team_index={d.get('my_team_index')} "
+                         f"team_pawns={d.get('team_pawns')}")
+            ex = r.get("extra") or {}
+            lines.append(f"    player_data_count={ex.get('player_data_count')} players={[(p.get('name'), p.get('skin'), p.get('chests')) for p in (r.get('players') or [])]}")
+            if ex.get("player_data_props"):
+                lines.append(f"    player data properties: {ex.get('player_data_props')}")
+            for dump in (ex.get("player_dump") or []):
+                lines.append(f"    {dump}")
+            props = (r.get("extra") or {}).get("player_state_props")
+            if props:
+                lines.append(f"    player state properties: {props}")
+        lines.append("")
         try:
             with open(LOG_FILE, encoding="utf-8", errors="replace") as f:
                 tail = f.read().splitlines()[-60:]
@@ -2157,8 +3077,14 @@ class App:
         if r and r.get("ok"):
             n = self.store.replay_count(r)
             txt = f"{r['time']}  -  {n} chest{'s' if n != 1 else ''}"
+            bits = []
             if self.store.setting("count_destroyed"):
-                txt += f"   ({r['opened']} opened, {r['destroyed']} destroyed)"
+                bits.append(f"{r['opened']} opened, {r['destroyed']} destroyed")
+            team = self.store.replay_team(r)
+            if team:
+                bits.append(f"{team} from teammates")
+            if bits:
+                txt += "   (" + ", ".join(bits) + ")"
             self.lbl_last.config(text=txt, fg=TEXT)
         else:
             self.lbl_last.config(text=getattr(self, "status_text", "") or "Nothing counted yet", fg=MUTED)
@@ -2172,13 +3098,15 @@ class App:
                 elif kind == "replay":
                     self.last = data
                     self.refresh()
-                    if data.get("ok") and data.get("chests"):
-                        self.lbl_total.config(fg="#ffffff")
+                    if data.get("ok") and (data.get("chests") or data.get("team")):
+                        self.lbl_total.config(fg=HOVER)
                         self.root.after(250, lambda: self.lbl_total.config(fg=ACCENT))
                     if data.get("fresh") and data.get("ok") and self.store.setting("notify"):
                         self._notify_match(data)
                 elif kind == "popup":
                     self._popup(*data)
+                elif kind == "update":
+                    self._on_update(*data)
         except queue.Empty:
             pass
         self.root.after(200, self._pump)
@@ -2224,7 +3152,7 @@ class App:
                 self.stat[k][0].config(text="-")
                 self.stat[k][1].config(text="no data yet")
         self.lbl_manual.config(text=f"Today's manual adjustment: {self.store.manual_today():+d}")
-        
+
         # Update overlay window if active
         if self.overlay_win and self.overlay_win.winfo_exists():
             self.overlay_win.update_stats()
@@ -2311,6 +3239,7 @@ def main():
 
 def __main__():
     main()
+
 
 if __name__ == "__main__":
     main()
