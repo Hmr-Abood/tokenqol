@@ -29,7 +29,54 @@ import webbrowser
 import zipfile
 from tkinter import ttk, messagebox, colorchooser
 
-APP_VERSION = "1.5"
+try:
+    from chest_icons import ICONS as CHEST_ICONS
+except Exception:
+    CHEST_ICONS = {}
+
+APP_VERSION = "1.7"
+
+# ---------------------------------------------------------------- chest kinds
+
+CHEST_KINDS = (("normal", "Normal"), ("rare", "Rare"), ("sprite", "Sprite"))
+
+
+def chest_kind(type_name):
+    """Sort a chest's internal class name into Normal / Rare / Sprite."""
+    n = (type_name or "").lower()
+    if "sprite" in n:
+        return "sprite"
+    if any(k in n for k in ("rare", "faction", "gold", "legend", "epic")):
+        return "rare"
+    return "normal"
+
+
+def kind_counts(types):
+    out = {k: 0 for k, _ in CHEST_KINDS}
+    for name, n in (types or {}).items():
+        try:
+            out[chest_kind(name)] += int(n)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+_ICON_CACHE = {}
+
+
+def kind_icon(kind, sub=2):
+    key = (kind, sub)
+    if key not in _ICON_CACHE:
+        img = None
+        if CHEST_ICONS.get(kind):
+            try:
+                img = tk.PhotoImage(data=CHEST_ICONS[kind])
+                img = img.subsample(sub) if sub > 1 else img
+            except tk.TclError:
+                img = None
+        _ICON_CACHE[key] = img
+    return _ICON_CACHE[key]
+
 
 # ---------------------------------------------------------------- paths & constants
 
@@ -45,9 +92,8 @@ DEMOS = os.path.join(LOCAL, "FortniteGame", "Saved", "Demos")
 
 DOTNET_INSTALL = "https://dot.net/v1/dotnet-install.ps1"
 # Source of the replay reader library (was referenced but not defined in the file you sent).
-REPO_ZIP = "https://github.com/Shiqan/FortniteReplayDecompressor/archive/refs/heads/master.zip"
 
-READER_VERSION = 9
+READER_VERSION = 10
 BIN_DIR = os.path.join(TOOLS, f"reader_v{READER_VERSION}")
 READER_DLL = os.path.join(BIN_DIR, "ChestReplayReader.dll")
 
@@ -90,6 +136,9 @@ FONT_FAMILY = "Segoe UI"
 FONT_SCALE = 1.0
 
 THEMES = {
+    "midnight": dict(BG="#0b0d12", SURFACE="#141821", SURFACE2="#1c2230", BORDER="#232a3a", TEXT="#f2f4f8",
+                     MUTED="#7d879c", ACCENT="#7c5cff", ACCENT_DIM="#4a3a99", VIOLET="#c4b5fd", GOOD="#34d399",
+                     WARN="#fbbf24", BAD="#fb7185", HOVER="#9a82ff", ON_ACCENT="#ffffff", LOGO="\u25C6"),
     "classic": dict(BG="#0e1014", SURFACE="#161a21", SURFACE2="#1d222b", BORDER="#2a303b", TEXT="#e9ecf3",
                     MUTED="#8a93a6", ACCENT="#36d6c8", ACCENT_DIM="#1d7f78", VIOLET="#9d8cff", GOOD="#4ade80",
                     WARN="#fbbf24", BAD="#f87171", HOVER="#6ff0e4", ON_ACCENT="#06201e", LOGO="\u25C6"),
@@ -144,7 +193,7 @@ def luminance(h):
 
 
 def build_theme(name, custom=None):
-    t = dict(THEMES.get(name) or THEMES["classic"])
+    t = dict(THEMES.get(name) or THEMES["midnight"])
     custom = custom or {}
     for k in COLOR_KEYS:
         if valid_hex(custom.get(k)):
@@ -387,81 +436,160 @@ class TokenSimulator(tk.Toplevel):
                     if self.done > MAX_LINES else ""))
 
 
-# ---------------------------------------------------------------- Draggable Overlay (In-Game / Stream Overlay)
+# ---------------------------------------------------------------- Stream / in-game overlay
+
+OVERLAY_STATS = (
+    ("total", "Total chests"), ("today", "Today"), ("week", "Last 7 days"),
+    ("token", "Token chance"), ("next", "Next milestone"), ("kinds", "Chest types"),
+    ("matches", "Matches counted"), ("last", "Last match"),
+)
+OVERLAY_DEFAULTS = {"total": True, "today": True, "week": False, "token": True, "next": False,
+                    "kinds": False, "matches": False, "last": True}
+OVERLAY_BGS = {"Theme": None, "Green screen": "#00ff00", "Magenta screen": "#ff00ff", "Black": "#000000"}
+OVERLAY_MODES = {"game": "Game overlay (borderless)", "stream": "Stream window (for OBS)"}
+
+
+def overlay_flags(store):
+    flags = dict(OVERLAY_DEFAULTS)
+    saved = store.setting("overlay_stats")
+    if isinstance(saved, dict):
+        flags.update({k: bool(v) for k, v in saved.items() if k in flags})
+    return flags
+
 
 class StatsOverlay(tk.Toplevel):
-    def __init__(self, parent, store):
+    def __init__(self, parent, store, on_close=None):
         super().__init__(parent)
-        self.store = store
-        self.overrideredirect(True)
-        self.attributes("-topmost", True)
-        self.set_opacity(store.setting("overlay_opacity"))
-        self.configure(bg=BORDER)
-
-        self._x = 0
-        self._y = 0
-
-        container = tk.Frame(self, bg=SURFACE)
-        container.pack(fill="both", expand=True, padx=1, pady=1)
-
-        # Header / Drag handle bar
-        header = tk.Frame(container, bg=SURFACE2, cursor="fleur")
-        header.pack(fill="x", padx=4, pady=4)
-        tk.Label(header, text=f"{LOGO} CHEST TRACKER OVERLAY", bg=SURFACE2, fg=ACCENT,
-                 font=font(8, "bold")).pack(side="left", padx=6, pady=4)
-
-        # Lock / Unlock Click-Through Toggle Button
+        self.store, self.on_close = store, on_close
+        mode = store.setting("overlay_mode")
+        self.mode = mode if mode in OVERLAY_MODES else "game"
+        self.chroma = OVERLAY_BGS.get(store.setting("overlay_bg") or "Theme")
+        self.bgc = self.chroma or SURFACE
         self.is_interactive = True
-        self.header = header
-        self.lock_btn = tk.Label(header, text="\U0001F513", bg=SURFACE2, fg=MUTED, font=font(9, "bold"), cursor="hand2")
-        self.lock_btn.pack(side="right", padx=(2, 6))
-        self.lock_btn.bind("<Button-1>", lambda e: self.toggle_click_through())
-        self.lock_btn.bind("<Enter>", lambda e: self.lock_btn.config(fg=TEXT))
-        self.lock_btn.bind("<Leave>", lambda e: self.lock_btn.config(fg=MUTED))
+        self._x = self._y = 0
+        self.vals = {}
+        self.header = None
+        self.lock_btn = None
+        self.title("Chest Tracker Overlay")
 
-        close_btn = tk.Label(header, text="\u00d7", bg=SURFACE2, fg=MUTED, font=font(10, "bold"), cursor="hand2")
-        close_btn.pack(side="right", padx=6)
-        close_btn.bind("<Button-1>", lambda e: self.destroy())
-        close_btn.bind("<Enter>", lambda e: close_btn.config(fg=BAD))
-        close_btn.bind("<Leave>", lambda e: close_btn.config(fg=MUTED))
+        if self.mode == "game":
+            self.overrideredirect(True)
+            self.attributes("-topmost", True)
+            self.set_opacity(store.setting("overlay_opacity"))
+            self.configure(bg=BORDER)
+        else:
+            # Normal titled window, no transparency: this is what OBS Window Capture can see.
+            self.configure(bg=self.bgc)
+            self.resizable(False, False)
+            self.protocol("WM_DELETE_WINDOW", self.close)
 
-        for w in (header, header.winfo_children()[0]):
-            w.bind("<Button-1>", self._start_move)
-            w.bind("<B1-Motion>", self._do_move)
-
-        # Stats Content Body
-        body = tk.Frame(container, bg=SURFACE)
-        body.pack(fill="both", expand=True, padx=12, pady=(2, 12))
-
-        tk.Label(body, text="TOTAL CHESTS", bg=SURFACE, fg=MUTED, font=font(7, "bold")).pack(anchor="w")
-        self.lbl_total = tk.Label(body, text="0", bg=SURFACE, fg=ACCENT, font=font(24, "bold"))
-        self.lbl_total.pack(anchor="w")
-
-        self.lbl_today = tk.Label(body, text="Today: 0", bg=SURFACE, fg=TEXT, font=font(9))
-        self.lbl_today.pack(anchor="w", pady=(1, 0))
-
-        self.lbl_token = tk.Label(body, text="Token Chance: -", bg=SURFACE, fg=VIOLET, font=font(9, "bold"))
-        self.lbl_token.pack(anchor="w", pady=(1, 4))
-
-        tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=4)
-
-        tk.Label(body, text="CURRENT SESSION & LAST MATCH", bg=SURFACE, fg=MUTED, font=font(7, "bold")).pack(anchor="w", pady=(2, 0))
-        self.lbl_session = tk.Label(body, text="Session Matches: 0", bg=SURFACE, fg=TEXT, font=font(9))
-        self.lbl_session.pack(anchor="w", pady=(1, 0))
-
-        self.lbl_last_match = tk.Label(body, text="Last Match: None", bg=SURFACE, fg=MUTED, font=font(8),
-                                       wraplength=210, justify="left")
-        self.lbl_last_match.pack(anchor="w", pady=(2, 0))
-
+        self._build()
         self.update_idletasks()
-        w_w = max(230, int(230 * FONT_SCALE))
-        w_h = max(210, int(210 * FONT_SCALE))
-        x = self.winfo_screenwidth() - w_w - 40
-        y = 40
-        self.geometry(f"{w_w}x{w_h}+{x}+{y}")
+        if self.mode == "game":
+            x = self.winfo_screenwidth() - self.winfo_reqwidth() - 40
+            self.geometry(f"+{x}+40")
+        else:
+            self.geometry("+60+60")
+            dark_titlebar(self, luminance(self.bgc) < 0.5)
         self.update_stats()
 
+    def close(self):
+        if self.on_close:
+            self.on_close()
+        self.destroy()
+
+    def rebuild(self):
+        self._build()
+        self.update_idletasks()
+        self.update_stats()
+
+    def _build(self):
+        for w in self.winfo_children():
+            w.destroy()
+        flags = overlay_flags(self.store)
+        bg = self.bgc
+        game = self.mode == "game"
+        self.vals = {}
+
+        shell = tk.Frame(self, bg=bg)
+        shell.pack(fill="both", expand=True, padx=1 if game else 0, pady=1 if game else 0)
+
+        if game:
+            tk.Frame(shell, bg=ACCENT, height=2).pack(fill="x")
+            bar = tk.Frame(shell, bg=bg, cursor="fleur")
+            bar.pack(fill="x", padx=px(14), pady=(px(8), 0))
+            self.header = bar
+            title = tk.Label(bar, text=f"{LOGO}  CHEST TRACKER", bg=bg, fg=ACCENT, font=font(8, "bold"))
+            title.pack(side="left")
+            close = tk.Label(bar, text="\u00d7", bg=bg, fg=MUTED, font=font(11, "bold"), cursor="hand2")
+            close.pack(side="right")
+            close.bind("<Button-1>", lambda e: self.close())
+            close.bind("<Enter>", lambda e: close.config(fg=BAD))
+            close.bind("<Leave>", lambda e: close.config(fg=MUTED))
+            self.lock_btn = tk.Label(bar, text="\U0001F513", bg=bg, fg=MUTED, font=font(9), cursor="hand2")
+            self.lock_btn.pack(side="right", padx=(0, px(8)))
+            self.lock_btn.bind("<Button-1>", lambda e: self.toggle_click_through())
+            for w in (bar, title):
+                w.bind("<Button-1>", self._start_move)
+                w.bind("<B1-Motion>", self._do_move)
+
+        body = tk.Frame(shell, bg=bg)
+        body.pack(fill="both", expand=True, padx=px(18), pady=(px(10) if game else px(14), px(16)))
+        tk.Frame(body, width=px(230), height=1, bg=bg).pack()
+
+        if flags["total"]:
+            tk.Label(body, text="TOTAL CHESTS", bg=bg, fg=MUTED, font=font(8, "bold")).pack(anchor="w")
+            line = tk.Frame(body, bg=bg)
+            line.pack(anchor="w")
+            self._chest_icon(line, bg).pack(side="left", padx=(0, px(10)))
+            self.vals["total"] = tk.Label(line, text="0", bg=bg, fg=ACCENT, font=font(36, "bold"))
+            self.vals["total"].pack(side="left")
+
+        for key, label, color in (("today", "Today", TEXT), ("week", "Last 7 days", TEXT),
+                                  ("token", "Token chance", VIOLET), ("next", "Next milestone", TEXT),
+                                  ("matches", "Matches counted", TEXT)):
+            if not flags[key]:
+                continue
+            row = tk.Frame(body, bg=bg)
+            row.pack(fill="x", pady=(px(5), 0))
+            tk.Label(row, text=label, bg=bg, fg=MUTED, font=font(10)).pack(side="left")
+            v = tk.Label(row, text="-", bg=bg, fg=color, font=font(11, "bold"))
+            v.pack(side="right", padx=(px(18), 0))
+            self.vals[key] = v
+
+        if flags["kinds"]:
+            row = tk.Frame(body, bg=bg)
+            row.pack(fill="x", pady=(px(10), 0))
+            for k, label in CHEST_KINDS:
+                cell = tk.Frame(row, bg=bg)
+                cell.pack(side="left", expand=True)
+                tk.Label(cell, text=label.upper(), bg=bg, fg=MUTED, font=font(7, "bold")).pack()
+                lbl = tk.Label(cell, text="0", bg=bg, fg=TEXT, font=font(14, "bold"))
+                lbl.pack()
+                self.vals["kind_" + k] = lbl
+
+        if flags["last"]:
+            self.vals["last"] = tk.Label(body, text="", bg=bg, fg=MUTED, font=font(9),
+                                         wraplength=px(230), justify="left")
+            self.vals["last"].pack(anchor="w", pady=(px(10), 0))
+
+        if not any(flags.values()):
+            tk.Label(body, text="No stats selected", bg=bg, fg=MUTED, font=font(10)).pack()
+
+    def _chest_icon(self, parent, bg):
+        img = kind_icon("normal", 2)
+        if img:
+            return tk.Label(parent, image=img, bg=bg)
+        s = px(34)  # fallback: a small drawn chest when chest_icons.py is missing
+        cv = tk.Canvas(parent, width=s, height=s, bg=bg, highlightthickness=0)
+        cv.create_rectangle(px(3), px(15), s - px(3), s - px(4), fill=ACCENT_DIM, outline=ACCENT, width=2)
+        cv.create_rectangle(px(3), px(7), s - px(3), px(16), fill=ACCENT, outline=ACCENT, width=2)
+        cv.create_rectangle(s / 2 - px(3), px(13), s / 2 + px(3), px(21), fill=bg, outline=ACCENT)
+        return cv
+
     def set_opacity(self, pct):
+        if self.mode != "game":
+            return  # transparency breaks window capture, so the stream window stays solid
         try:
             v = max(30, min(100, int(pct))) / 100
         except (TypeError, ValueError):
@@ -469,19 +597,16 @@ class StatsOverlay(tk.Toplevel):
         self.attributes("-alpha", v)
 
     def toggle_click_through(self):
-        """Toggle the window between interactive (movable/closable) and click-through (gameplay mode)."""
+        """Game overlay only: switch between movable and click-through."""
         try:
             hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
-
+            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
             if self.is_interactive:
-                # Enable click-through: Add WS_EX_TRANSPARENT (0x00000020) and keep WS_EX_LAYERED
                 ctypes.windll.user32.SetWindowLongW(hwnd, -20, ex_style | 0x00000020 | 0x00080000)
                 self.is_interactive = False
                 self.lock_btn.config(text="\U0001F512", fg=WARN)
                 self.header.config(cursor="")
             else:
-                # Disable click-through: Remove WS_EX_TRANSPARENT
                 ctypes.windll.user32.SetWindowLongW(hwnd, -20, ex_style & ~0x00000020)
                 self.is_interactive = True
                 self.lock_btn.config(text="\U0001F513", fg=MUTED)
@@ -490,46 +615,58 @@ class StatsOverlay(tk.Toplevel):
             pass
 
     def _start_move(self, event):
-        if not self.is_interactive:
-            return
-        self._x = event.x
-        self._y = event.y
+        if self.is_interactive:
+            self._x, self._y = event.x, event.y
 
     def _do_move(self, event):
-        if not self.is_interactive:
-            return
-        x = self.winfo_x() + (event.x - self._x)
-        y = self.winfo_y() + (event.y - self._y)
-        self.geometry(f"+{x}+{y}")
+        if self.is_interactive:
+            self.geometry(f"+{self.winfo_x() + event.x - self._x}+{self.winfo_y() + event.y - self._y}")
 
     def update_stats(self):
         if not self.winfo_exists():
             return
+        v = self.vals
+
+        def put(k, text, fg=None):
+            w = v.get(k)
+            if w is not None:
+                w.config(text=text)
+                if fg:
+                    w.config(fg=fg)
+
         days = self.store.days()
         total = sum(days.values())
-        today = days.get(today_key(), 0)
-        matches_count = self.store.matches_counted()
+        today = dt.date.today()
+        put("total", f"{total:,}")
+        put("today", f"{days.get(today_key(), 0):,}")
+        put("week", f"{sum(days.get((today - dt.timedelta(days=i)).isoformat(), 0) for i in range(7)):,}")
+        put("token", fmt_pct(token_chance(total)) if total > 0 else "-")
+        nxt = None
+        for p in MILESTONES:
+            need = chests_for_chance(p)
+            if need > total:
+                nxt = (p, need - total)
+                break
+        put("next", f"{nxt[0]:.0%} in {nxt[1]:,}" if nxt else "All reached")
+        put("matches", str(self.store.matches_counted()))
+        kt = self.store.kind_totals()
+        for k, _ in CHEST_KINDS:
+            put("kind_" + k, f"{kt[k]:,}")
 
-        self.lbl_total.config(text=f"{total:,}")
-        self.lbl_today.config(text=f"Today: {today:,}")
-        self.lbl_token.config(text=f"Token Chance: {fmt_pct(token_chance(total))}" if total > 0 else "Token Chance: -")
-        self.lbl_session.config(text=f"Session Matches Counted: {matches_count}")
-
-        items = sorted(self.store.replay_list().items(), key=lambda kv: kv[1].get("mtime", 0), reverse=True)
-        if items:
-            _, r = items[0]
-            if r.get("ok"):
-                n = self.store.replay_count(r)
-                time_str = r.get('time', '')
-                detail = f"{r.get('opened', 0)}op, {r.get('destroyed', 0)}dst"
-                team = self.store.replay_team(r)
-                if team:
-                    detail += f", +{team} team"
-                self.lbl_last_match.config(text=f"Last ({time_str}): {n} chests ({detail})", fg=TEXT)
+        if "last" in v:
+            items = sorted(self.store.replay_list().items(), key=lambda kv: kv[1].get("mtime", 0), reverse=True)
+            if not items:
+                put("last", "Last match: none yet", MUTED)
             else:
-                self.lbl_last_match.config(text="Last Match: Error reading", fg=BAD)
-        else:
-            self.lbl_last_match.config(text="Last Match: None yet", fg=MUTED)
+                r = items[0][1]
+                if r.get("ok"):
+                    n = self.store.replay_count(r)
+                    team = self.store.replay_team(r)
+                    extra = f"  (+{team} team)" if team else ""
+                    put("last", f"Last match ({r.get('time', '')}): {n} chest{'s' if n != 1 else ''}{extra}", TEXT)
+                else:
+                    put("last", "Last match: error reading", BAD)
+
 
 # ---------------------------------------------------------------- C# replay reader
 
@@ -939,6 +1076,7 @@ public class ChestReader : ReplayReader
         public bool Me, Bot;
         public string Name = "", Skin = "";
         public int Opened, Destroyed;
+        public Dictionary<string, int> Types = new();
     }
 
     private sealed class PdRow
@@ -1010,11 +1148,16 @@ public class ChestReader : ReplayReader
         foreach (var r in rows.Values) r.Name = StateName(r.State);
 
         var me = rows.Values.First(r => r.Me);
-        foreach (var c in mine) { if (c.AsDestroyed) me.Destroyed++; else me.Opened++; }
+        foreach (var c in mine)
+        {
+            if (c.AsDestroyed) me.Destroyed++; else me.Opened++;
+            me.Types[c.Type] = me.Types.GetValueOrDefault(c.Type) + 1;
+        }
         foreach (var c in team)
             if (PawnToState.TryGetValue(c.Owner, out var st) && rows.TryGetValue(st, out var row2))
             {
                 if (c.AsDestroyed) row2.Destroyed++; else row2.Opened++;
+                row2.Types[c.Type] = row2.Types.GetValueOrDefault(c.Type) + 1;
             }
 
         var matched = 0;
@@ -1055,6 +1198,7 @@ public class ChestReader : ReplayReader
             {
                 name = r.Name, me = r.Me, skin = r.Skin, bot = r.Bot,
                 opened = r.Opened, destroyed = r.Destroyed, chests = r.Opened + r.Destroyed,
+                types = r.Types,
             }).ToList();
     }
 
@@ -1571,9 +1715,11 @@ class Store:
         self.manual, self.replays = {}, {}
         self.reader_version = 0
         self.settings = {"count_destroyed": True, "count_team": True, "delete_days": 3, "chest_types": [],
-                         "help_seen": False, "theme": "pirate", "notify": True,
+                         "help_seen": False, "theme": "midnight", "notify": True,
                          "custom_colors": {}, "font_family": "Segoe UI", "font_pct": 100,
-                         "logo": "Default", "overlay_opacity": 90, "check_updates": True}
+                         "logo": "Default", "overlay_opacity": 90, "check_updates": True,
+                         "overlay_mode": "game", "overlay_bg": "Theme",
+                         "overlay_stats": dict(OVERLAY_DEFAULTS)}
         try:
             with open(DATA_FILE, encoding="utf-8") as f:
                 d = json.load(f)
@@ -1660,6 +1806,19 @@ class Store:
                 if r.get("ok") and r.get("day"):
                     out[r["day"]] = out.get(r["day"], 0) + self.replay_count(r)
             return {k: v for k, v in out.items() if v > 0}
+
+    def kind_totals(self):
+        """Normal / Rare / Sprite chest totals across all counted matches."""
+        with self.lock:
+            out = {k: 0 for k, _ in CHEST_KINDS}
+            for r in self.replays.values():
+                if not r.get("ok"):
+                    continue
+                for p in r.get("players") or []:
+                    if p.get("me") or self.settings.get("count_team", True):
+                        for k, n in kind_counts(p.get("types")).items():
+                            out[k] += n
+            return out
 
     def match_stats(self):
         with self.lock:
@@ -1918,6 +2077,7 @@ class Worker(threading.Thread):
                 "team_destroyed": int(r.get("team_destroyed", 0)) if ok else 0,
                 "team_known": bool(r.get("team_known")),
                 "players": r.get("players") or [],
+                "by_type": r.get("by_type") or {},
                 "day": dt.date.fromtimestamp(mtime).isoformat(),
                 "time": dt.datetime.fromtimestamp(mtime).strftime("%H:%M"),
                 "mtime": mtime,
@@ -2011,33 +2171,103 @@ def dark_titlebar(win, dark=True):
 
 
 def card(parent, **kw):
-    return tk.Frame(parent, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER, **kw)
+    return tk.Frame(parent, bg=SURFACE, highlightthickness=1,
+                    highlightbackground=mix(SURFACE, BORDER, 0.6), **kw)
 
 
 def flat_button(parent, text, command, primary=False, width=None):
     bg, fg = (ACCENT, ON_ACCENT) if primary else (SURFACE2, TEXT)
     hover = HOVER if primary else BORDER
     b = tk.Label(parent, text=text, bg=bg, fg=fg, font=font(10, "bold" if primary else "normal"),
-                 padx=px(14), pady=px(7), cursor="hand2", width=width or 0)
+                 padx=px(16), pady=px(8), cursor="hand2", width=width or 0)
     b.bind("<Button-1>", lambda e: command())
     b.bind("<Enter>", lambda e: b.config(bg=hover))
     b.bind("<Leave>", lambda e: b.config(bg=bg))
     return b
 
 
+class Switch(tk.Canvas):
+    """Modern on/off toggle bound to a tk.BooleanVar."""
+
+    def __init__(self, parent, var, command=None, bg=None):
+        self.w, self.h = px(40), px(22)
+        super().__init__(parent, width=self.w, height=self.h, bg=bg or SURFACE,
+                         highlightthickness=0, cursor="hand2")
+        self.var, self.command = var, command
+        self.bind("<Button-1>", self._click)
+        var.trace_add("write", lambda *a: self._draw())
+        self._draw()
+
+    def _click(self, e):
+        self.var.set(not self.var.get())
+        if self.command:
+            self.command()
+
+    def _draw(self):
+        try:
+            self.delete("all")
+        except tk.TclError:
+            return
+        on = bool(self.var.get())
+        w, h = self.w, self.h
+        track = ACCENT if on else BORDER
+        self.create_oval(0, 0, h, h, fill=track, width=0)
+        self.create_oval(w - h, 0, w, h, fill=track, width=0)
+        self.create_rectangle(h / 2, 0, w - h / 2, h, fill=track, width=0)
+        pad = px(3)
+        d = h - 2 * pad
+        x = w - h + pad if on else pad
+        self.create_oval(x, pad, x + d, pad + d, fill=ON_ACCENT if on else TEXT, width=0)
+
+
 class NavButton(tk.Label):
     def __init__(self, parent, text, command):
-        super().__init__(parent, text=text, bg=BG, fg=MUTED, font=font(11, "bold"), padx=px(12), pady=px(8),
-                         cursor="hand2")
-        self.command = command
-        self.active = False
+        super().__init__(parent, text=text, bg=BG, fg=MUTED, font=font(10, "bold"),
+                         padx=px(14), pady=px(7), cursor="hand2")
+        self.command, self.active = command, False
         self.bind("<Button-1>", lambda e: self.command())
-        self.bind("<Enter>", lambda e: self.config(fg=TEXT))
-        self.bind("<Leave>", lambda e: self.config(fg=ACCENT if self.active else MUTED))
+        self.bind("<Enter>", lambda e: self.config(fg=TEXT, bg=mix(BG, SURFACE2, 0.6)))
+        self.bind("<Leave>", lambda e: self._paint())
+
+    def _paint(self):
+        self.config(bg=SURFACE2 if self.active else BG, fg=ACCENT if self.active else MUTED)
 
     def set_active(self, on):
         self.active = on
-        self.config(fg=ACCENT if on else MUTED)
+        self._paint()
+
+
+class ScrollFrame(tk.Frame):
+    """A vertically scrollable page. Put your widgets in .inner"""
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self.cv = tk.Canvas(self, bg=BG, highlightthickness=0)
+        self.sb = ttk.Scrollbar(self, orient="vertical", command=self.cv.yview)
+        self.inner = tk.Frame(self.cv, bg=BG)
+        self._win = self.cv.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", lambda e: self.cv.configure(scrollregion=self.cv.bbox("all")))
+        self.cv.bind("<Configure>", lambda e: self.cv.itemconfigure(self._win, width=e.width))
+        self.cv.configure(yscrollcommand=self.sb.set)
+        self.sb.pack(side="right", fill="y")
+        self.cv.pack(side="left", fill="both", expand=True, padx=(0, px(4)))
+        self.bind_all("<MouseWheel>", self._wheel, add="+")
+
+    def _wheel(self, e):
+        try:
+            if not self.winfo_ismapped():
+                return
+            box = self.cv.bbox("all")
+            if not box or box[3] <= self.cv.winfo_height():
+                return  # everything already fits
+            w = self.winfo_containing(e.x_root, e.y_root)
+            while w is not None:
+                if w is self:
+                    self.cv.yview_scroll(int(-e.delta / 120), "units")
+                    return
+                w = w.master
+        except tk.TclError:
+            pass  # widget was destroyed during a theme rebuild
 
 
 class SkinCache:
@@ -2109,7 +2339,7 @@ class SkinCache:
 
 
 class MatchDetail(tk.Toplevel):
-    """Shows one match: you and every teammate with their chest count and skin."""
+    """Shows one match: you and every teammate with their chest count, chest types and skin."""
 
     def __init__(self, parent, store, r, skins):
         super().__init__(parent)
@@ -2120,8 +2350,8 @@ class MatchDetail(tk.Toplevel):
         self.images = {}
         self.title("Match details")
         self.configure(bg=BG)
-        self.geometry(f"{px(580)}x{px(540)}")
-        self.minsize(px(500), px(380))
+        self.geometry(f"{px(620)}x{px(580)}")
+        self.minsize(px(520), px(400))
         self.protocol("WM_DELETE_WINDOW", self._close)
         self._build()
         dark_titlebar(self, luminance(BG) < 0.5)
@@ -2166,7 +2396,7 @@ class MatchDetail(tk.Toplevel):
             self._player_row(inner, p)
         if not r.get("team_known"):
             tk.Label(inner, text="Your team could not be identified in this replay, so only your own chests are listed.",
-                     bg=BG, fg=WARN, font=font(9), wraplength=px(480), justify="left").pack(anchor="w", pady=px(4))
+                     bg=BG, fg=WARN, font=font(9), wraplength=px(520), justify="left").pack(anchor="w", pady=px(4))
 
     def _player_row(self, parent, p):
         st = self.store
@@ -2191,6 +2421,25 @@ class MatchDetail(tk.Toplevel):
         cid = p.get("skin") or ""
         skin = tk.Label(mid, text="Loading skin..." if cid else "Skin unknown", bg=SURFACE, fg=MUTED, font=font(9))
         skin.pack(anchor="w")
+
+        # chest types this player opened
+        kinds = kind_counts(p.get("types"))
+        if any(kinds.values()):
+            chips = tk.Frame(mid, bg=SURFACE)
+            chips.pack(anchor="w", pady=(px(6), 0))
+            for k, label in CHEST_KINDS:
+                if not kinds[k]:
+                    continue
+                chip = tk.Frame(chips, bg=SURFACE2)
+                chip.pack(side="left", padx=(0, px(6)))
+                img = kind_icon(k)
+                if img:
+                    tk.Label(chip, image=img, bg=SURFACE2).pack(side="left", padx=(px(4), 0))
+                tk.Label(chip, text=f"{label}  {kinds[k]}", bg=SURFACE2, fg=TEXT,
+                         font=font(9, "bold"), padx=px(6), pady=px(3)).pack(side="left")
+        elif p.get("opened") or p.get("destroyed"):
+            tk.Label(mid, text="Chest types unavailable (re-scan this match)", bg=SURFACE, fg=MUTED,
+                     font=font(8)).pack(anchor="w", pady=(px(4), 0))
 
         opened, destroyed = int(p.get("opened", 0)), int(p.get("destroyed", 0))
         n = opened + (destroyed if st.setting("count_destroyed") else 0)
@@ -2247,6 +2496,7 @@ HELP_TEXT = (
     "Counted: every chest you open and, if enabled, the chests you break. Chests opened by your teammates "
     "are added too (you can turn that off in Settings). Chests opened by enemies or other teams are never "
     "counted.\n\n"
+    "Click a match in the Matches tab to see which chest types (Normal, Rare, Sprite) each player opened.\n\n"
     "Use the Customize tab to change the theme, colors, font and the live Stream Overlay."
 )
 
@@ -2273,8 +2523,8 @@ class App:
         self._update_prompted = False
 
         root.title("Chest Tracker")
-        root.geometry(f"{px(960)}x{px(780)}")
-        root.minsize(px(920), px(700))
+        root.geometry(f"{px(960)}x{px(840)}")
+        root.minsize(px(920), px(760))
         self._build_ui()
 
         self.worker = Worker(self.store, self.events)
@@ -2348,10 +2598,10 @@ class App:
             s.theme_use("clam")
         except tk.TclError:
             pass
-        s.configure("Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=TEXT, rowheight=px(30),
+        s.configure("Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=TEXT, rowheight=px(34),
                     borderwidth=0, font=font(10))
         s.configure("Treeview.Heading", background=SURFACE2, foreground=MUTED, relief="flat",
-                    font=font(9, "bold"), padding=(px(8), px(6)))
+                    font=font(9, "bold"), padding=(px(8), px(8)))
         s.map("Treeview", background=[("selected", SURFACE2)], foreground=[("selected", ACCENT)])
         s.map("Treeview.Heading", background=[("active", BORDER)])
         s.configure("Vertical.TScrollbar", background=BORDER, troughcolor=SURFACE, bordercolor=SURFACE,
@@ -2385,7 +2635,7 @@ class App:
         for key, label in (("dashboard", "Dashboard"), ("matches", "Matches"), ("milestones", "Milestones"),
                            ("settings", "Settings"), ("customize", "Customize"), ("credits", "Credits")):
             b = NavButton(nav, label, lambda k=key: self.show(k))
-            b.pack(side="left")
+            b.pack(side="left", padx=px(2))
             self.nav[key] = b
 
         self.pill = tk.Label(h, text="\u25CF  Starting", bg=SURFACE, fg=MUTED, font=font(9, "bold"),
@@ -2413,32 +2663,32 @@ class App:
     def _build_dashboard(self):
         page = tk.Frame(self.body, bg=BG)
         self.pages["dashboard"] = page
-        page.columnconfigure(0, weight=5, uniform="c")
-        page.columnconfigure(1, weight=6, uniform="c")
+        page.columnconfigure(0, weight=4, uniform="c")
+        page.columnconfigure(1, weight=5, uniform="c")
+        page.rowconfigure(1, weight=1)
 
+        # ---- hero
         hero = card(page)
         hero.grid(row=0, column=0, sticky="nsew", padx=(0, px(8)), pady=(0, px(12)))
-        tk.Label(hero, text="TOTAL CHESTS", bg=SURFACE, fg=MUTED, font=font(9, "bold")).pack(pady=(px(22), 0))
-        self.lbl_total = tk.Label(hero, text="0", bg=SURFACE, fg=ACCENT, font=font(64, "bold"))
+        tk.Label(hero, text="TOTAL CHESTS", bg=SURFACE, fg=MUTED, font=font(9, "bold")).pack(pady=(px(18), 0))
+        self.lbl_total = tk.Label(hero, text="0", bg=SURFACE, fg=ACCENT, font=font(56, "bold"))
         self.lbl_total.pack()
-        self.lbl_matches = tk.Label(hero, text="", bg=SURFACE, fg=MUTED, font=font(10))
+        self.lbl_matches = tk.Label(hero, text="", bg=SURFACE, fg=MUTED, font=font(9), justify="center")
         self.lbl_matches.pack()
-        tk.Frame(hero, bg=BORDER, height=1).pack(fill="x", padx=px(28), pady=(px(10), px(8)))
+        tk.Frame(hero, bg=BORDER, height=1).pack(fill="x", padx=px(36), pady=px(12))
         tk.Label(hero, text="SHOP TOKEN CHANCE", bg=SURFACE, fg=MUTED, font=font(8, "bold")).pack()
-        self.lbl_token = tk.Label(hero, text="-", bg=SURFACE, fg=VIOLET, font=font(24, "bold"), cursor="hand2")
+        self.lbl_token = tk.Label(hero, text="-", bg=SURFACE, fg=VIOLET, font=font(22, "bold"), cursor="hand2")
         self.lbl_token.pack()
         self.lbl_token.bind("<Button-1>", lambda e: self._token_info())
-        tk.Label(hero, text="click to see how this is worked out", bg=SURFACE, fg=MUTED,
-                 font=font(8)).pack()
-        self.lbl_next = tk.Label(hero, text="", bg=SURFACE, fg=ACCENT, font=font(9, "bold"))
-        self.lbl_next.pack(pady=(px(4), 0))
-        sim_btn = tk.Label(hero, text="Simulate token rolls", bg=SURFACE2, fg=TEXT, font=font(9),
-                           padx=px(12), pady=px(5), cursor="hand2")
-        sim_btn.pack(pady=(px(8), px(14)))
-        sim_btn.bind("<Button-1>", lambda e: self._open_sim())
-        sim_btn.bind("<Enter>", lambda e: sim_btn.config(bg=BORDER))
-        sim_btn.bind("<Leave>", lambda e: sim_btn.config(bg=SURFACE2))
+        self.lbl_next = tk.Label(hero, text="", bg=SURFACE, fg=MUTED, font=font(9))
+        self.lbl_next.pack(pady=(px(2), 0))
+        sim = tk.Label(hero, text="Simulate token rolls  \u203A", bg=SURFACE, fg=MUTED, font=font(9), cursor="hand2")
+        sim.pack(pady=(px(8), px(16)))
+        sim.bind("<Button-1>", lambda e: self._open_sim())
+        sim.bind("<Enter>", lambda e: sim.config(fg=ACCENT))
+        sim.bind("<Leave>", lambda e: sim.config(fg=MUTED))
 
+        # ---- stat cards
         grid = tk.Frame(page, bg=BG)
         grid.grid(row=0, column=1, sticky="nsew", padx=(px(8), 0), pady=(0, px(12)))
         for c in range(2):
@@ -2449,40 +2699,62 @@ class App:
         for i, (key, title) in enumerate((("today", "TODAY"), ("week", "LAST 7 DAYS"),
                                           ("avg", "DAILY AVERAGE"), ("best", "BEST DAY"))):
             c = card(grid)
-            c.grid(row=i // 2, column=i % 2, sticky="nsew", padx=(0 if i % 2 == 0 else px(6), px(6) if i % 2 == 0 else 0),
+            c.grid(row=i // 2, column=i % 2, sticky="nsew",
+                   padx=(0 if i % 2 == 0 else px(6), px(6) if i % 2 == 0 else 0),
                    pady=(0 if i < 2 else px(6), px(6) if i < 2 else 0))
-            tk.Label(c, text=title, bg=SURFACE, fg=MUTED, font=font(8, "bold")).pack(anchor="w", padx=px(14), pady=(px(12), 0))
-            v = tk.Label(c, text="0", bg=SURFACE, fg=TEXT, font=font(24, "bold"))
+            tk.Label(c, text=title, bg=SURFACE, fg=MUTED, font=font(8, "bold")).pack(
+                anchor="w", padx=px(14), pady=(px(12), 0))
+            v = tk.Label(c, text="0", bg=SURFACE, fg=TEXT, font=font(22, "bold"))
             v.pack(anchor="w", padx=px(14))
-            sub = tk.Label(c, text="", bg=SURFACE, fg=MUTED, font=font(9))
+            sub = tk.Label(c, text="", bg=SURFACE, fg=MUTED, font=font(8))
             sub.pack(anchor="w", padx=px(14), pady=(0, px(10)))
             self.stat[key] = (v, sub)
 
+        # ---- chart
         chart_card = card(page)
         chart_card.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, px(12)))
-        page.rowconfigure(1, weight=1)
         head = tk.Frame(chart_card, bg=SURFACE)
-        head.pack(fill="x", padx=px(16), pady=(px(12), 0))
-        tk.Label(head, text="Last 14 days", bg=SURFACE, fg=TEXT, font=font(11, "bold")).pack(side="left")
+        head.pack(fill="x", padx=px(16), pady=(px(10), 0))
+        tk.Label(head, text="LAST 14 DAYS", bg=SURFACE, fg=MUTED, font=font(8, "bold")).pack(side="left")
         self.lbl_hover = tk.Label(head, text="", bg=SURFACE, fg=MUTED, font=font(9))
         self.lbl_hover.pack(side="right")
-        self.cv = tk.Canvas(chart_card, bg=SURFACE, highlightthickness=0, height=px(150))
-        self.cv.pack(fill="both", expand=True, padx=px(10), pady=(px(4), px(10)))
+        self.cv = tk.Canvas(chart_card, bg=SURFACE, highlightthickness=0, height=px(120))
+        self.cv.pack(fill="both", expand=True, padx=px(10), pady=(px(2), px(8)))
         self.cv.bind("<Configure>", lambda e: self.draw_chart())
         self.cv.bind("<Motion>", self._chart_hover)
         self.cv.bind("<Leave>", lambda e: self._set_hover(None))
 
-        self.last_card = card(page)
-        self.last_card.grid(row=2, column=0, columnspan=2, sticky="ew")
-        self.lbl_last_title = tk.Label(self.last_card, text="LAST MATCH", bg=SURFACE, fg=MUTED, font=font(8, "bold"))
-        self.lbl_last_title.pack(anchor="w", padx=px(16), pady=(px(10), 0))
-        self.lbl_last = tk.Label(self.last_card, text="Nothing counted yet", bg=SURFACE, fg=TEXT, font=font(11))
-        self.lbl_last.pack(anchor="w", padx=px(16), pady=(0, px(10)))
+        # ---- footer: chest types | last match
+        foot = card(page)
+        foot.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.last_card = foot
+        left = tk.Frame(foot, bg=SURFACE)
+        left.pack(side="left", padx=px(6), pady=px(10))
+        self.kind_lbls = {}
+        for k, label in CHEST_KINDS:
+            cell = tk.Frame(left, bg=SURFACE)
+            cell.pack(side="left", padx=px(12))
+            img = kind_icon(k, 2)
+            if img:
+                tk.Label(cell, image=img, bg=SURFACE).pack(side="left", padx=(0, px(8)))
+            tbox = tk.Frame(cell, bg=SURFACE)
+            tbox.pack(side="left")
+            tk.Label(tbox, text=label.upper(), bg=SURFACE, fg=MUTED, font=font(8, "bold")).pack(anchor="w")
+            self.kind_lbls[k] = tk.Label(tbox, text="0", bg=SURFACE, fg=TEXT, font=font(16, "bold"))
+            self.kind_lbls[k].pack(anchor="w")
+        tk.Frame(foot, bg=BORDER, width=1).pack(side="left", fill="y", pady=px(10))
+        right = tk.Frame(foot, bg=SURFACE)
+        right.pack(side="left", fill="both", expand=True, padx=px(16), pady=px(10))
+        self.lbl_last_title = tk.Label(right, text="LAST MATCH", bg=SURFACE, fg=MUTED, font=font(8, "bold"))
+        self.lbl_last_title.pack(anchor="w")
+        self.lbl_last = tk.Label(right, text="Nothing counted yet", bg=SURFACE, fg=TEXT, font=font(10),
+                                 wraplength=px(340), justify="left")
+        self.lbl_last.pack(anchor="w")
 
     def _build_matches(self):
         page = tk.Frame(self.body, bg=BG)
         self.pages["matches"] = page
-        tk.Label(page, text="Click a match to see your teammates, their chests and their skins", bg=BG, fg=MUTED,
+        tk.Label(page, text="Click a match to see your teammates, their chests, chest types and skins", bg=BG, fg=MUTED,
                  font=font(9)).pack(anchor="w", pady=(0, px(6)))
         c = card(page)
         c.pack(fill="both", expand=True)
@@ -2673,83 +2945,140 @@ class App:
             link.bind("<Leave>", lambda e, w=link: w.config(fg=VIOLET))
         tk.Frame(c, bg=SURFACE, height=px(20)).pack()
 
+    # ------------------------------------------------------------ settings helpers
+
+    def _section(self, parent, title, sub=None):
+        c = card(parent)
+        c.pack(fill="x", pady=(0, px(12)))
+        tk.Label(c, text=title, bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(
+            anchor="w", padx=px(18), pady=(px(14), 0 if sub else px(6)))
+        if sub:
+            tk.Label(c, text=sub, bg=SURFACE, fg=MUTED, font=font(9)).pack(
+                anchor="w", padx=px(18), pady=(0, px(6)))
+        return c
+
+    def _divider(self, parent):
+        tk.Frame(parent, bg=mix(SURFACE, BORDER, 0.6), height=1).pack(fill="x", padx=px(18))
+
+    def _setting_row(self, parent, title, desc, build_control):
+        row = tk.Frame(parent, bg=SURFACE)
+        row.pack(fill="x", padx=px(18), pady=px(8))
+        left = tk.Frame(row, bg=SURFACE)
+        left.pack(side="left", fill="x", expand=True)
+        tk.Label(left, text=title, bg=SURFACE, fg=TEXT, font=font(10, "bold")).pack(anchor="w")
+        if desc:
+            tk.Label(left, text=desc, bg=SURFACE, fg=MUTED, font=font(9), wraplength=px(280),
+                     justify="left").pack(anchor="w")
+        right = tk.Frame(row, bg=SURFACE)
+        right.pack(side="right", padx=(px(12), 0))
+        build_control(right)
+
+    def _switch_row(self, parent, title, desc, var, command):
+        self._setting_row(parent, title, desc, lambda p: Switch(p, var, command).pack())
+
+    def _tile(self, parent, icon, title, desc, command):
+        t = tk.Frame(parent, bg=SURFACE2, cursor="hand2")
+        ic = tk.Label(t, text=icon, bg=SURFACE2, fg=ACCENT, font=font(14), width=2)
+        ic.pack(side="left", padx=(px(10), px(4)), pady=px(8))
+        box = tk.Frame(t, bg=SURFACE2)
+        box.pack(side="left", fill="x", expand=True, pady=px(6))
+        tl = tk.Label(box, text=title, bg=SURFACE2, fg=TEXT, font=font(10, "bold"))
+        tl.pack(anchor="w")
+        dl = tk.Label(box, text=desc, bg=SURFACE2, fg=MUTED, font=font(8))
+        dl.pack(anchor="w")
+        widgets = (t, ic, box, tl, dl)
+
+        def paint(color):
+            for w in widgets:
+                w.config(bg=color)
+        for w in widgets:
+            w.bind("<Button-1>", lambda e: command())
+            w.bind("<Enter>", lambda e: paint(BORDER))
+            w.bind("<Leave>", lambda e: paint(SURFACE2))
+        return t
+
     def _build_settings(self):
-        page = tk.Frame(self.body, bg=BG)
-        self.pages["settings"] = page
-        page.columnconfigure(0, weight=1)
+        sf = ScrollFrame(self.body)
+        self.pages["settings"] = sf
+        page = sf.inner
+        page.columnconfigure(0, weight=1, uniform="s")
+        page.columnconfigure(1, weight=1, uniform="s")
+        left = tk.Frame(page, bg=BG)
+        left.grid(row=0, column=0, sticky="new", padx=(0, px(8)))
+        right = tk.Frame(page, bg=BG)
+        right.grid(row=0, column=1, sticky="new", padx=(px(8), 0))
 
-        c1 = card(page)
-        c1.pack(fill="x", pady=(0, px(12)))
-        tk.Label(c1, text="Counting", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(anchor="w", padx=px(18), pady=(px(14), px(6)))
+        # ---- counting
+        c = self._section(left, "Counting", "What gets added to your total")
         self.v_destroyed = tk.BooleanVar(value=bool(self.store.setting("count_destroyed")))
-        ttk.Checkbutton(c1, text="Count destroyed chests (broken with the pickaxe or explosives)",
-                        variable=self.v_destroyed, style="Dark.TCheckbutton",
-                        command=self._destroyed_changed).pack(anchor="w", padx=px(18))
+        self._switch_row(c, "Destroyed chests", "Count chests broken with the pickaxe or explosives",
+                         self.v_destroyed, self._destroyed_changed)
+        self._divider(c)
         self.v_team = tk.BooleanVar(value=bool(self.store.setting("count_team")))
-        ttk.Checkbutton(c1, text="Also count my teammates' chests (duos, trios, squads)",
-                        variable=self.v_team, style="Dark.TCheckbutton",
-                        command=self._team_changed).pack(anchor="w", padx=px(18), pady=(px(6), 0))
-        row = tk.Frame(c1, bg=SURFACE)
-        row.pack(anchor="w", padx=px(18), pady=(px(10), px(4)))
-        tk.Label(row, text="Delete counted replays after", bg=SURFACE, fg=TEXT, font=font(10)).pack(side="left")
+        self._switch_row(c, "Teammates' chests", "Also count chests your duo, trio or squad opened",
+                         self.v_team, self._team_changed)
+        self._divider(c)
         self.v_days = tk.StringVar(value=str(self.store.setting("delete_days")))
-        sp = ttk.Spinbox(row, from_=0, to=365, width=4, textvariable=self.v_days, command=self._days_changed)
-        sp.pack(side="left", padx=px(8))
-        sp.bind("<FocusOut>", lambda e: self._days_changed())
-        sp.bind("<Return>", lambda e: self._days_changed())
-        tk.Label(row, text="days  (0 = never)", bg=SURFACE, fg=MUTED, font=font(9)).pack(side="left")
-        tk.Frame(c1, bg=SURFACE, height=px(12)).pack()
 
-        c_ui = card(page)
-        c_ui.pack(fill="x", pady=(0, px(12)))
-        tk.Label(c_ui, text="Alerts", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(
-            anchor="w", padx=px(18), pady=(px(14), px(6)))
+        def days_ctl(p):
+            sp = ttk.Spinbox(p, from_=0, to=365, width=4, textvariable=self.v_days, command=self._days_changed)
+            sp.pack(side="left")
+            sp.bind("<FocusOut>", lambda e: self._days_changed())
+            sp.bind("<Return>", lambda e: self._days_changed())
+            tk.Label(p, text="days", bg=SURFACE, fg=MUTED, font=font(9)).pack(side="left", padx=(px(6), 0))
+        self._setting_row(c, "Clean up replays", "Delete counted replays after this long (0 = never)", days_ctl)
+        tk.Frame(c, bg=SURFACE, height=px(6)).pack()
+
+        # ---- alerts
+        c = self._section(left, "Alerts and updates")
         self.v_notify = tk.BooleanVar(value=bool(self.store.setting("notify")))
-        ttk.Checkbutton(c_ui, text="Show desktop notification when match is counted",
-                        variable=self.v_notify, style="Dark.TCheckbutton",
-                        command=self._notify_changed).pack(anchor="w", padx=px(18))
-        self.v_updates = tk.BooleanVar(value=bool(self.store.setting("check_updates")))
-        ttk.Checkbutton(c_ui, text="Check for a newer version when the app starts",
-                        variable=self.v_updates, style="Dark.TCheckbutton",
-                        command=self._updates_changed).pack(anchor="w", padx=px(18), pady=(px(6), 0))
-        r_ui = tk.Frame(c_ui, bg=SURFACE)
-        r_ui.pack(anchor="w", padx=px(18), pady=(px(10), px(14)))
-        flat_button(r_ui, "Test notification",
-                    lambda: self._notify("Chest Tracker", "Notifications are working.")).pack(side="left")
 
-        c2 = card(page)
-        c2.pack(fill="x", pady=(0, px(12)))
-        tk.Label(c2, text="Manual Correction (Today)", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(anchor="w", padx=px(18), pady=(px(14), px(6)))
-        r2 = tk.Frame(c2, bg=SURFACE)
-        r2.pack(anchor="w", padx=px(18), pady=(0, px(14)))
-        flat_button(r2, "\u2212 1", lambda: self._correct(-1)).pack(side="left")
-        flat_button(r2, "+ 1", lambda: self._correct(1)).pack(side="left", padx=px(8))
-        self.lbl_manual = tk.Label(r2, text="", bg=SURFACE, fg=MUTED, font=font(9))
+        def notify_ctl(p):
+            flat_button(p, "Test", lambda: self._notify("Chest Tracker", "Notifications are working.")).pack(
+                side="left", padx=(0, px(10)))
+            Switch(p, self.v_notify, self._notify_changed).pack(side="left")
+        self._setting_row(c, "Match notifications", "Desktop popup when a match is counted", notify_ctl)
+        self._divider(c)
+        self.v_updates = tk.BooleanVar(value=bool(self.store.setting("check_updates")))
+        self._switch_row(c, "Check for updates", "Look for a newer version when the app starts",
+                         self.v_updates, self._updates_changed)
+        tk.Frame(c, bg=SURFACE, height=px(6)).pack()
+
+        # ---- manual correction
+        c = self._section(right, "Manual correction", "Fix today's count if a match was missed")
+        row = tk.Frame(c, bg=SURFACE)
+        row.pack(fill="x", padx=px(18), pady=(px(2), px(14)))
+        flat_button(row, "\u2212 1", lambda: self._correct(-1)).pack(side="left")
+        flat_button(row, "+ 1", lambda: self._correct(1)).pack(side="left", padx=px(8))
+        self.lbl_manual = tk.Label(row, text="", bg=SURFACE, fg=MUTED, font=font(9))
         self.lbl_manual.pack(side="left", padx=px(10))
 
-        c3 = card(page)
-        c3.pack(fill="x", pady=(0, px(12)))
-        tk.Label(c3, text="Tools", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(anchor="w", padx=px(18), pady=(px(14), px(8)))
-        r3 = tk.Frame(c3, bg=SURFACE)
-        r3.pack(anchor="w", padx=px(18), pady=(0, px(14)))
-        flat_button(r3, "Replays folder", self.open_demos).pack(side="left")
-        flat_button(r3, "Data folder", lambda: open_path(DATA_DIR)).pack(side="left", padx=px(8))
-        flat_button(r3, "Log", lambda: open_path(LOG_FILE)).pack(side="left")
-        flat_button(r3, "Re-scan all", self._rescan).pack(side="left", padx=px(8))
-        flat_button(r3, "Save diagnostics", self.save_report).pack(side="left")
-        flat_button(r3, "Check for updates", lambda: self._check_updates(True)).pack(side="left", padx=px(8))
-
-        c4 = card(page)
-        c4.pack(fill="x")
-        tk.Label(c4, text="How it works", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(anchor="w", padx=px(18), pady=(px(14), px(4)))
-        tk.Label(c4, text=HELP_TEXT, bg=SURFACE, fg=MUTED, font=font(9), justify="left", anchor="w",
-                 wraplength=px(760)).pack(anchor="w", padx=px(18), pady=(0, px(14)))
+        # ---- tools
+        c = self._section(right, "Tools", "Folders, maintenance and help")
+        grid = tk.Frame(c, bg=SURFACE)
+        grid.pack(fill="x", padx=px(14), pady=(px(2), px(14)))
+        grid.columnconfigure(0, weight=1, uniform="t")
+        grid.columnconfigure(1, weight=1, uniform="t")
+        tiles = (
+            ("\U0001F3AC", "Replays", "Open Fortnite replays", self.open_demos),
+            ("\U0001F4C1", "Data folder", "Saved stats and settings", lambda: open_path(DATA_DIR)),
+            ("\u21BB", "Re-scan all", "Re-read every match", self._rescan),
+            ("\U0001F4C4", "Setup log", "Reader build output", lambda: open_path(LOG_FILE)),
+            ("\u2699", "Diagnostics", "Save a debug report", self.save_report),
+            ("\u2B06", "Updates", "Check GitHub now", lambda: self._check_updates(True)),
+            ("?", "How it works", "Quick guide",
+             lambda: messagebox.showinfo("How it works", HELP_TEXT, parent=self.root)),
+        )
+        for i, (ic, t, d, cmd) in enumerate(tiles):
+            self._tile(grid, ic, t, d, cmd).grid(row=i // 2, column=i % 2, sticky="ew",
+                                                  padx=px(4), pady=px(4))
 
     # ------------------------------------------------------------ customize page
 
     def _build_customize(self):
-        page = tk.Frame(self.body, bg=BG)
-        self.pages["customize"] = page
+        sf = ScrollFrame(self.body)
+        self.pages["customize"] = sf
+        page = sf.inner
         custom = self.store.setting("custom_colors") or {}
 
         # theme presets
@@ -2762,7 +3091,7 @@ class App:
         current = self.store.setting("theme")
         for name in THEMES:
             flat_button(row, name.capitalize(), lambda n=name: self._set_preset(n),
-                        primary=(name == current and not custom)).pack(side="left", padx=(0, px(8)))
+                        primary=(name == current and not custom)).pack(side="left", padx=(0, px(6)))
 
         # individual colors
         c2 = card(page)
@@ -2815,23 +3144,64 @@ class App:
         lg.bind("<<ComboboxSelected>>", lambda e: self._look_changed())
 
         # overlay
-        c4 = card(page)
-        c4.pack(fill="x")
-        tk.Label(c4, text="Stream overlay", bg=SURFACE, fg=TEXT, font=font(12, "bold")).pack(
-            anchor="w", padx=px(18), pady=(px(14), px(6)))
+        c4 = self._section(page, "Stream overlay", "Live stats on your stream or in game")
         self.v_overlay = tk.BooleanVar(value=False)
-        ttk.Checkbutton(c4, text="Show In-Game / Stream Stats Overlay", variable=self.v_overlay,
-                        style="Dark.TCheckbutton", command=self._toggle_overlay).pack(anchor="w", padx=px(18))
-        r4 = tk.Frame(c4, bg=SURFACE)
-        r4.pack(anchor="w", padx=px(18), pady=(px(10), px(14)))
-        tk.Label(r4, text="Overlay opacity", bg=SURFACE, fg=TEXT, font=font(10)).pack(side="left")
+        self._switch_row(c4, "Show overlay", "Open the stats overlay", self.v_overlay, self._toggle_overlay)
+        self._divider(c4)
+
+        self.v_omode = tk.StringVar(
+            value=OVERLAY_MODES.get(self.store.setting("overlay_mode"), OVERLAY_MODES["game"]))
+
+        def mode_ctl(p):
+            cb = ttk.Combobox(p, values=list(OVERLAY_MODES.values()), textvariable=self.v_omode,
+                              state="readonly", width=24)
+            cb.pack()
+            cb.bind("<<ComboboxSelected>>", lambda e: self._overlay_look_changed())
+        self._setting_row(c4, "Mode", "Use Stream window for OBS Window Capture", mode_ctl)
+
+        bgname = self.store.setting("overlay_bg")
+        self.v_obg = tk.StringVar(value=bgname if bgname in OVERLAY_BGS else "Theme")
+
+        def bg_ctl(p):
+            cb = ttk.Combobox(p, values=list(OVERLAY_BGS), textvariable=self.v_obg, state="readonly", width=24)
+            cb.pack()
+            cb.bind("<<ComboboxSelected>>", lambda e: self._overlay_look_changed())
+        self._setting_row(c4, "Background", "Green/Magenta screen lets OBS cut the background out", bg_ctl)
+
         self.v_opacity = tk.IntVar(value=int(self.store.setting("overlay_opacity") or 90))
-        sc = ttk.Scale(r4, from_=30, to=100, orient="horizontal", length=px(220), variable=self.v_opacity,
-                       command=self._opacity_live)
-        sc.pack(side="left", padx=px(10))
-        sc.bind("<ButtonRelease-1>", lambda e: self.store.set_setting("overlay_opacity", int(self.v_opacity.get())))
-        self.lbl_opacity = tk.Label(r4, text=f"{self.v_opacity.get()}%", bg=SURFACE, fg=MUTED, font=font(9))
-        self.lbl_opacity.pack(side="left")
+
+        def op_ctl(p):
+            sc = ttk.Scale(p, from_=30, to=100, orient="horizontal", length=px(160), variable=self.v_opacity,
+                           command=self._opacity_live)
+            sc.pack(side="left")
+            sc.bind("<ButtonRelease-1>",
+                    lambda e: self.store.set_setting("overlay_opacity", int(self.v_opacity.get())))
+            self.lbl_opacity = tk.Label(p, text=f"{self.v_opacity.get()}%", bg=SURFACE, fg=MUTED,
+                                        font=font(9), width=5)
+            self.lbl_opacity.pack(side="left")
+        self._setting_row(c4, "Opacity", "Game overlay only (the stream window is always solid)", op_ctl)
+        self._divider(c4)
+
+        tk.Label(c4, text="Stats shown", bg=SURFACE, fg=TEXT, font=font(10, "bold")).pack(
+            anchor="w", padx=px(18), pady=(px(10), px(2)))
+        flags = overlay_flags(self.store)
+        self.v_ostats = {}
+        sg = tk.Frame(c4, bg=SURFACE)
+        sg.pack(fill="x", padx=px(18), pady=(px(4), px(4)))
+        sg.columnconfigure(0, weight=1, uniform="o")
+        sg.columnconfigure(1, weight=1, uniform="o")
+        for i, (key, label) in enumerate(OVERLAY_STATS):
+            cell = tk.Frame(sg, bg=SURFACE)
+            cell.grid(row=i // 2, column=i % 2, sticky="w", pady=px(4))
+            var = tk.BooleanVar(value=flags[key])
+            self.v_ostats[key] = var
+            Switch(cell, var, lambda k=key: self._overlay_stat_changed(k)).pack(side="left")
+            tk.Label(cell, text=label, bg=SURFACE, fg=TEXT, font=font(10)).pack(side="left", padx=px(10))
+        tk.Label(c4, text="OBS: add a Window Capture source, pick \"Chest Tracker Overlay\", and leave the "
+                          "capture method on Windows 10 (1903+). With a Green/Magenta background, add a Color Key "
+                          "filter. Keep the window open (not minimized).",
+                 bg=SURFACE, fg=MUTED, font=font(9), wraplength=px(820), justify="left").pack(
+            anchor="w", padx=px(18), pady=(px(8), px(14)))
 
     def _set_preset(self, name):
         self.store.set_setting("theme", name)
@@ -2875,11 +3245,33 @@ class App:
     def _toggle_overlay(self):
         if self.v_overlay.get():
             if not self.overlay_win or not self.overlay_win.winfo_exists():
-                self.overlay_win = StatsOverlay(self.root, self.store)
+                self.overlay_win = StatsOverlay(self.root, self.store,
+                                                on_close=lambda: self.v_overlay.set(False))
         else:
             if self.overlay_win and self.overlay_win.winfo_exists():
                 self.overlay_win.destroy()
                 self.overlay_win = None
+
+    def _restart_overlay(self):
+        if self.overlay_win and self.overlay_win.winfo_exists():
+            self.overlay_win.destroy()
+            self.overlay_win = None
+        if self.v_overlay.get():
+            self._toggle_overlay()
+
+    def _overlay_look_changed(self):
+        mode = next((k for k, v in OVERLAY_MODES.items() if v == self.v_omode.get()), "game")
+        bg = self.v_obg.get() if self.v_obg.get() in OVERLAY_BGS else "Theme"
+        self.store.set_setting("overlay_mode", mode)
+        self.store.set_setting("overlay_bg", bg)
+        self._restart_overlay()
+
+    def _overlay_stat_changed(self, key):
+        flags = overlay_flags(self.store)
+        flags[key] = bool(self.v_ostats[key].get())
+        self.store.set_setting("overlay_stats", flags)
+        if self.overlay_win and self.overlay_win.winfo_exists():
+            self.overlay_win.rebuild()
 
     # ------------------------------------------------------------ update checker
 
@@ -3006,6 +3398,7 @@ class App:
                          f"player_state_exports={d.get('player_state_exports')} "
                          f"states_with_team={d.get('states_with_team')} my_team_index={d.get('my_team_index')} "
                          f"team_pawns={d.get('team_pawns')}")
+            lines.append(f"    chest types (internal names): {r.get('by_type')}")
             ex = r.get("extra") or {}
             lines.append(f"    player_data_count={ex.get('player_data_count')} players={[(p.get('name'), p.get('skin'), p.get('chests')) for p in (r.get('players') or [])]}")
             if ex.get("player_data_props"):
@@ -3120,6 +3513,9 @@ class App:
         total = sum(days.values())
         today = dt.date.today()
         self.lbl_total.config(text=f"{total:,}")
+        kt = self.store.kind_totals()
+        for k, _ in CHEST_KINDS:
+            self.kind_lbls[k].config(text=f"{kt[k]:,}")
         n = self.store.matches_counted()
         mn, mtotal, mbest, _ = self.store.match_stats()
         line = f"across {n} match{'es' if n != 1 else ''}"
@@ -3186,9 +3582,10 @@ class App:
         mx = max(1, max(vals))
         pad_x, top, bottom, slot = self._geometry(w, h)
         bw = slot * 0.58
+        r = bw / 2
         for gy in (0.5, 1.0):
             y = h - bottom - (h - top - bottom) * gy
-            cv.create_line(pad_x, y, w - pad_x, y, fill=SURFACE2)
+            cv.create_line(pad_x, y, w - pad_x, y, fill=mix(SURFACE, SURFACE2, 0.8))
         for i, (d, v) in enumerate(zip(seq, vals)):
             cx = pad_x + slot * i + slot / 2
             bh = (h - top - bottom) * v / mx
@@ -3196,10 +3593,16 @@ class App:
             color = ACCENT if is_today else (VIOLET if self.hover == i else ACCENT_DIM)
             base = h - bottom
             if v:
-                cv.create_rectangle(cx - bw / 2, base - bh, cx + bw / 2, base, fill=color, width=0)
-                cv.create_text(cx, base - bh - px(9), text=str(v), fill=TEXT if is_today else MUTED, font=font(8))
+                ty = base - bh
+                if bh > bw:
+                    # rounded top: a circle cap over a rectangle
+                    cv.create_oval(cx - r, ty, cx + r, ty + bw, fill=color, width=0)
+                    cv.create_rectangle(cx - r, ty + r, cx + r, base, fill=color, width=0)
+                else:
+                    cv.create_rectangle(cx - r, ty, cx + r, base, fill=color, width=0)
+                cv.create_text(cx, ty - px(9), text=str(v), fill=TEXT if is_today else MUTED, font=font(8))
             else:
-                cv.create_rectangle(cx - bw / 2, base - px(2), cx + bw / 2, base, fill=SURFACE2, width=0)
+                cv.create_rectangle(cx - r, base - px(2), cx + r, base, fill=SURFACE2, width=0)
             cv.create_text(cx, h - px(10), text="today" if is_today else str(d.day),
                            fill=ACCENT if is_today else MUTED, font=font(8))
 
