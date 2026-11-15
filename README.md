@@ -37,6 +37,8 @@ A Windows desktop tool for tracking Fortnite chest openings, monitoring Pirate S
 
 ### Customization
 - Customizable stream overlays for displaying chest statistics.
+- <img width="261" height="287" alt="image" src="https://github.com/user-attachments/assets/c6866821-c836-42d2-85e5-27f024caa3bf" />
+
 <img width="918" height="610" alt="image" src="https://github.com/user-attachments/assets/969298d6-d30b-4588-a4ed-94ada35f83dc" />
 
 - Multiple interface themes.
