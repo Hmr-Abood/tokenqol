@@ -9,7 +9,7 @@ A Windows desktop tool for tracking Fortnite chest openings, monitoring Pirate S
 
 ### Chest Tracking
 - Automatically scans locally saved Fortnite replay files.
-![Uploading image.png…]()
+<img width="939" height="752" alt="image" src="https://github.com/user-attachments/assets/077f88b3-619c-4fbe-ba56-7ea4fd0df4c1" />
 
 - Tracks your total chest openings.
 <img width="403" height="409" alt="image" src="https://github.com/user-attachments/assets/47ebfa03-0b0e-4621-bc24-d3938c5a3e0e" />
