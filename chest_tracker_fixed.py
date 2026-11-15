@@ -241,6 +241,21 @@ def fmt_pct(x):
     return f"{x * 100:.2f}%"
 
 
+def fmt_duration(sec):
+    """Seconds -> '12h 05m', '34m 10s' or '45s'."""
+    try:
+        sec = max(0, int(sec or 0))
+    except (TypeError, ValueError):
+        sec = 0
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h:,}h {m:02d}m"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+
 def px(n):
     return int(round(n * SCALE))
 
@@ -441,10 +456,10 @@ class TokenSimulator(tk.Toplevel):
 OVERLAY_STATS = (
     ("total", "Total chests"), ("today", "Today"), ("week", "Last 7 days"),
     ("token", "Token chance"), ("next", "Next milestone"), ("kinds", "Chest types"),
-    ("matches", "Matches counted"), ("last", "Last match"),
+    ("matches", "Matches counted"), ("playtime", "Playtime"), ("last", "Last match"),
 )
 OVERLAY_DEFAULTS = {"total": True, "today": True, "week": False, "token": True, "next": False,
-                    "kinds": False, "matches": False, "last": True}
+                    "kinds": False, "matches": False, "playtime": False, "last": True}
 OVERLAY_BGS = {"Theme": None, "Green screen": "#00ff00", "Magenta screen": "#ff00ff", "Black": "#000000"}
 OVERLAY_MODES = {"game": "Game overlay (borderless)", "stream": "Stream window (for OBS)"}
 
@@ -547,7 +562,7 @@ class StatsOverlay(tk.Toplevel):
 
         for key, label, color in (("today", "Today", TEXT), ("week", "Last 7 days", TEXT),
                                   ("token", "Token chance", VIOLET), ("next", "Next milestone", TEXT),
-                                  ("matches", "Matches counted", TEXT)):
+                                  ("matches", "Matches counted", TEXT), ("playtime", "Playtime", TEXT)):
             if not flags[key]:
                 continue
             row = tk.Frame(body, bg=bg)
@@ -649,6 +664,7 @@ class StatsOverlay(tk.Toplevel):
                 break
         put("next", f"{nxt[0]:.0%} in {nxt[1]:,}" if nxt else "All reached")
         put("matches", str(self.store.matches_counted()))
+        put("playtime", fmt_duration(self.store.total_playtime()))
         kt = self.store.kind_totals()
         for k, _ in CHEST_KINDS:
             put("kind_" + k, f"{kt[k]:,}")
@@ -1832,6 +1848,17 @@ class Store:
         with self.lock:
             return sum(1 for r in self.replays.values() if r.get("ok"))
 
+    def total_playtime(self):
+        """Total length (seconds) of every counted match."""
+        with self.lock:
+            return sum(int(r.get("duration") or 0) for r in self.replays.values() if r.get("ok"))
+
+    def playtime_today(self):
+        with self.lock:
+            k = today_key()
+            return sum(int(r.get("duration") or 0) for r in self.replays.values()
+                       if r.get("ok") and r.get("day") == k)
+
 
 # ---------------------------------------------------------------- reader setup
 
@@ -2035,7 +2062,7 @@ class Worker(threading.Thread):
                 continue
             prev = known.get(f)
             if prev and prev.get("size") == st.st_size and prev.get("version") == READER_VERSION \
-                    and not prev.get("pending"):
+                    and not prev.get("pending") and "duration" in prev:
                 continue
             if now - st.st_mtime < QUIET_SECONDS:
                 continue
@@ -2081,6 +2108,7 @@ class Worker(threading.Thread):
                 "day": dt.date.fromtimestamp(mtime).isoformat(),
                 "time": dt.datetime.fromtimestamp(mtime).strftime("%H:%M"),
                 "mtime": mtime,
+                "duration": int(r.get("duration_sec") or 0) if ok else 0,
                 "size": st.st_size,
                 "version": READER_VERSION,
                 "recorder_found": bool(r.get("recorder_found")),
@@ -2369,6 +2397,8 @@ class MatchDetail(tk.Toplevel):
                  font=font(14, "bold")).pack(anchor="w")
         mine, team = st.replay_mine(r), st.replay_team_raw(r)
         line = f"You: {mine}    Teammates: {team}    Added to your total: {st.replay_count(r)}"
+        if r.get("duration"):
+            line += f"    Length: {fmt_duration(r['duration'])}"
         if team and not st.setting("count_team"):
             line += "   (teammates are switched off in Settings)"
         tk.Label(head, text=line, bg=BG, fg=MUTED, font=font(10)).pack(anchor="w", pady=(2, 0))
@@ -2675,6 +2705,9 @@ class App:
         self.lbl_total.pack()
         self.lbl_matches = tk.Label(hero, text="", bg=SURFACE, fg=MUTED, font=font(9), justify="center")
         self.lbl_matches.pack()
+        self.lbl_playtime = tk.Label(hero, text="", bg=SURFACE, fg=TEXT, font=font(11, "bold"),
+                                     justify="center")
+        self.lbl_playtime.pack(pady=(px(4), 0))
         tk.Frame(hero, bg=BORDER, height=1).pack(fill="x", padx=px(36), pady=px(12))
         tk.Label(hero, text="SHOP TOKEN CHANCE", bg=SURFACE, fg=MUTED, font=font(8, "bold")).pack()
         self.lbl_token = tk.Label(hero, text="-", bg=SURFACE, fg=VIOLET, font=font(22, "bold"), cursor="hand2")
@@ -2758,10 +2791,10 @@ class App:
                  font=font(9)).pack(anchor="w", pady=(0, px(6)))
         c = card(page)
         c.pack(fill="both", expand=True)
-        cols = ("when", "total", "opened", "destroyed", "team", "status")
+        cols = ("when", "total", "opened", "destroyed", "team", "length", "status")
         self.tv = ttk.Treeview(c, columns=cols, show="headings")
         spec = {"when": ("MATCH", 160, "w"), "total": ("CHESTS", 80, "e"), "opened": ("OPENED", 80, "e"),
-                "destroyed": ("DESTROYED", 100, "e"), "team": ("TEAMMATES", 100, "e"),
+                "destroyed": ("DESTROYED", 100, "e"), "team": ("TEAMMATES", 100, "e"), "length": ("LENGTH", 90, "e"),
                 "status": ("STATUS", 240, "w")}
         for k, (t, w, a) in spec.items():
             self.tv.heading(k, text=t, anchor=a)
@@ -2798,9 +2831,10 @@ class App:
             if r.get("ok"):
                 team = self.store.replay_team_raw(r)
                 nums = (self.store.replay_count(r), r.get("opened", 0), r.get("destroyed", 0),
-                        team if team_on else f"({team})")
+                        team if team_on else f"({team})",
+                        fmt_duration(r.get("duration")) if r.get("duration") else "-")
             else:
-                nums = ("-", "-", "-", "-")
+                nums = ("-", "-", "-", "-", "-")
             self.tv.insert("", "end", iid=rname, values=(when, *nums, status), tags=(tag,) if tag else ())
 
     def _match_clicked(self, e):
@@ -3522,6 +3556,14 @@ class App:
         if mn:
             line += f"\n{mtotal / mn:.1f} per match  -  best match {mbest:,}"
         self.lbl_matches.config(text=line)
+        play, play_today = self.store.total_playtime(), self.store.playtime_today()
+        if play:
+            ptxt = f"Playtime: {fmt_duration(play)}"
+            if play_today:
+                ptxt += f"  ({fmt_duration(play_today)} today)"
+            self.lbl_playtime.config(text=ptxt)
+        else:
+            self.lbl_playtime.config(text="")
         self.lbl_token.config(text=fmt_pct(token_chance(total)) if total > 0 else "-")
         nxt = self._next_milestone(total)
         if nxt:
