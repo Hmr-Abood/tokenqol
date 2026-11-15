@@ -2,7 +2,7 @@
 
 A Windows desktop tool for tracking Fortnite chest openings, monitoring Pirate Shop progress, and analyzing reward probabilities.
 
-<img width="948" height="781" alt="image" src="https://github.com/user-attachments/assets/f8bc9228-0096-4913-97b5-44d4b94875ba" />
+<img width="937" height="820" alt="image" src="https://github.com/user-attachments/assets/3c9e11f4-01d1-44a7-a44d-a08ec23aead2" />
 
 
 ## Features
