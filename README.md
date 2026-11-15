@@ -15,7 +15,7 @@ A Windows desktop tool for tracking Fortnite chest openings, monitoring Pirate S
 <img width="910" height="88" alt="image" src="https://github.com/user-attachments/assets/56d59895-dbe8-49d2-93b8-a214f1788c91" />
 
 - Tracks each teammate's chest count individually.
-<img width="571" height="561" alt="image" src="https://github.com/user-attachments/assets/ce62ee73-9ff1-423b-bb18-086590d66db0" />
+<img width="598" height="578" alt="image" src="https://github.com/user-attachments/assets/a9e3d4bd-8c1e-4bf8-a3a3-847a1db26015" />
 
 - View chest statistics across multiple matches.
 - Keep a history of processed matches.
