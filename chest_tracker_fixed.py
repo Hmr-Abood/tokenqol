@@ -7,7 +7,9 @@ by enemies or other teams are never counted.
 It never touches the game or its memory: it only reads files Fortnite already writes to your PC.
 """
 
+import colorsys
 import ctypes
+import ctypes.wintypes
 import datetime as dt
 import io
 import json
@@ -25,6 +27,7 @@ import tkinter as tk
 import urllib.error
 import urllib.parse
 import urllib.request
+import tkinter.font as tkfont
 import webbrowser
 import zipfile
 from tkinter import ttk, messagebox, colorchooser
@@ -95,7 +98,7 @@ DEMOS = os.path.join(LOCAL, "FortniteGame", "Saved", "Demos")
 DOTNET_INSTALL = "https://dot.net/v1/dotnet-install.ps1"
 # Source of the replay reader library (was referenced but not defined in the file you sent).
 
-READER_VERSION = 10
+READER_VERSION = 11
 BIN_DIR = os.path.join(TOOLS, f"reader_v{READER_VERSION}")
 READER_DLL = os.path.join(BIN_DIR, "ChestReplayReader.dll")
 
@@ -241,6 +244,36 @@ def fmt_pct(x):
     if 0 < x < 1e-4:
         return "<0.01%"
     return f"{x * 100:.2f}%"
+
+
+def game_mode(r):
+    """Readable game mode for a match, e.g. 'Zero Build Duos'. Falls back to team size when the replay has no playlist."""
+    raw = str(r.get("playlist") or "")
+    low = raw.lower()
+    size = None
+    for key, label in (("solo", "Solo"), ("duo", "Duos"), ("trio", "Trios"), ("squad", "Squads")):
+        if key in low:
+            size = label
+            break
+    if size is None:
+        n = int(r.get("team_size") or 0) or (len(r.get("players") or []) if r.get("team_known") else 0)
+        size = {1: "Solo", 2: "Duos", 3: "Trios", 4: "Squads"}.get(n)
+    parts = []
+    if "nobuild" in low or "zerobuild" in low:
+        parts.append("Zero Build")
+    if "ranked" in low or "competitive" in low:
+        parts.append("Ranked")
+    if "reload" in low:
+        parts.append("Reload")
+    if size:
+        parts.append(size)
+    if parts:
+        return " ".join(parts)
+    if raw:
+        name = re.sub(r"^playlist_?", "", raw.split(".")[-1], flags=re.I)
+        name = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name.replace("_", " ")).strip()
+        return name or "-"
+    return "-"
 
 
 def fmt_duration(sec):
@@ -459,9 +492,10 @@ OVERLAY_STATS = (
     ("total", "Total chests"), ("today", "Today"), ("week", "Last 7 days"),
     ("token", "Token chance"), ("next", "Next milestone"), ("kinds", "Chest types"),
     ("matches", "Matches counted"), ("playtime", "Playtime"), ("last", "Last match"),
+    ("promo", "Download link (side)"),
 )
 OVERLAY_DEFAULTS = {"total": True, "today": True, "week": False, "token": True, "next": False,
-                    "kinds": False, "matches": False, "playtime": False, "last": True}
+                    "kinds": False, "matches": False, "playtime": False, "last": True, "promo": True}
 OVERLAY_BGS = {"Theme": None, "Green screen": "#00ff00", "Magenta screen": "#ff00ff", "Black": "#000000"}
 OVERLAY_MODES = {"game": "Game overlay (borderless)", "stream": "Stream window (for OBS)"}
 
@@ -483,6 +517,7 @@ class StatsOverlay(tk.Toplevel):
         self.chroma = OVERLAY_BGS.get(store.setting("overlay_bg") or "Theme")
         self.bgc = self.chroma or SURFACE
         self.is_interactive = True
+        self._passing = False
         self._x = self._y = 0
         self.vals = {}
         self.header = None
@@ -505,6 +540,11 @@ class StatsOverlay(tk.Toplevel):
         if self.mode == "game":
             x = self.winfo_screenwidth() - self.winfo_reqwidth() - 40
             self.geometry(f"+{x}+40")
+            # Game overlay starts click-through so stray clicks/drags never reach it.
+            # Ctrl+Shift+L unlocks it (to move or close it) and locks it again.
+            self.after(150, lambda: self._set_click_through(True))
+            self._hk_down = False
+            self._poll_hotkey()
         else:
             self.geometry("+60+60")
             dark_titlebar(self, luminance(self.bgc) < 0.5)
@@ -531,6 +571,42 @@ class StatsOverlay(tk.Toplevel):
         shell = tk.Frame(self, bg=bg)
         shell.pack(fill="both", expand=True, padx=1 if game else 0, pady=1 if game else 0)
 
+        if flags["promo"]:
+            # Slim strip down the right side with the download link for people watching a stream.
+            pf = font(8, "bold")
+            fnt = tkfont.Font(font=pf)
+            widths = [fnt.measure(ch) for ch in PROMO_TEXT]
+            tlen = sum(widths)
+            strip = tk.Canvas(shell, width=px(26), height=tlen + px(28), bg=bg, highlightthickness=0)
+            strip.pack(side="right", fill="y")
+            strip.create_line(0, px(10), 0, 9999, fill=BORDER)
+            # one text item per letter (rotated, reading bottom to top) so a rainbow can flow along the text
+            letters = [strip.create_text(px(14), 0, text=ch, angle=90, fill=ACCENT, font=pf) for ch in PROMO_TEXT]
+            state = {"job": None, "t": 0.0}
+
+            def place(e=None):
+                y = strip.winfo_height() / 2 + tlen / 2
+                for item, w in zip(letters, widths):
+                    strip.coords(item, px(14), y - w / 2)
+                    y -= w
+
+            def rainbow():
+                try:
+                    if not strip.winfo_exists():
+                        return
+                    state["t"] += 0.012
+                    n = len(letters)
+                    for k, item in enumerate(letters):
+                        r, g, b = colorsys.hsv_to_rgb((state["t"] + k / n * 0.8) % 1.0, 0.7, 1.0)
+                        strip.itemconfig(item, fill="#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255)))
+                    state["job"] = strip.after(40, rainbow)
+                except tk.TclError:
+                    pass
+
+            strip.bind("<Configure>", place)
+            strip.bind("<Destroy>", lambda e: strip.after_cancel(state["job"]) if state["job"] and e.widget is strip else None)
+            rainbow()
+
         if game:
             tk.Frame(shell, bg=ACCENT, height=2).pack(fill="x")
             bar = tk.Frame(shell, bg=bg, cursor="fleur")
@@ -549,6 +625,9 @@ class StatsOverlay(tk.Toplevel):
             for w in (bar, title):
                 w.bind("<Button-1>", self._start_move)
                 w.bind("<B1-Motion>", self._do_move)
+            if not self.is_interactive:
+                self.lock_btn.config(text="\U0001F512", fg=WARN)
+                bar.config(cursor="")
 
         body = tk.Frame(shell, bg=bg)
         body.pack(fill="both", expand=True, padx=px(18), pady=(px(10) if game else px(14), px(16)))
@@ -613,23 +692,74 @@ class StatsOverlay(tk.Toplevel):
             v = 0.9
         self.attributes("-alpha", v)
 
-    def toggle_click_through(self):
-        """Game overlay only: switch between movable and click-through."""
+    def _set_click_through(self, on):
+        """Game overlay only: on = mouse clicks pass straight through to the game."""
+        if self.mode != "game":
+            return
         try:
-            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-            ex_style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
-            if self.is_interactive:
-                ctypes.windll.user32.SetWindowLongW(hwnd, -20, ex_style | 0x00000020 | 0x00080000)
-                self.is_interactive = False
-                self.lock_btn.config(text="\U0001F512", fg=WARN)
-                self.header.config(cursor="")
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+            ex_style = user32.GetWindowLongW(hwnd, -20)
+            # 0x20 transparent (click-through), 0x80000 layered, 0x08000000 no-activate (never steals focus)
+            if on:
+                ex_style |= 0x00000020 | 0x00080000 | 0x08000000
             else:
-                ctypes.windll.user32.SetWindowLongW(hwnd, -20, ex_style & ~0x00000020)
-                self.is_interactive = True
-                self.lock_btn.config(text="\U0001F513", fg=MUTED)
-                self.header.config(cursor="fleur")
+                ex_style &= ~(0x00000020 | 0x08000000)
+            user32.SetWindowLongW(hwnd, -20, ex_style)
         except Exception:
             pass
+        self.is_interactive = not on
+        self._passing = on
+        if self.lock_btn and self.lock_btn.winfo_exists():
+            self.lock_btn.config(text="\U0001F512" if on else "\U0001F513", fg=WARN if on else MUTED)
+        if self.header and self.header.winfo_exists():
+            self.header.config(cursor="" if on else "fleur")
+
+    def _pass_clicks(self, on):
+        """Flip just the click-through bit (used for the temporary hover over the lock button)."""
+        if on == self._passing:
+            return
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+            ex_style = user32.GetWindowLongW(hwnd, -20)
+            ex_style = (ex_style | 0x20) if on else (ex_style & ~0x20)
+            user32.SetWindowLongW(hwnd, -20, ex_style)
+            self._passing = on
+        except Exception:
+            pass
+
+    def _over_lock_button(self):
+        try:
+            pt = ctypes.wintypes.POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            b = self.lock_btn
+            pad = 6
+            return (b.winfo_rootx() - pad <= pt.x <= b.winfo_rootx() + b.winfo_width() + pad and
+                    b.winfo_rooty() - pad <= pt.y <= b.winfo_rooty() + b.winfo_height() + pad)
+        except Exception:
+            return False
+
+    def toggle_click_through(self):
+        self._set_click_through(self.is_interactive)
+
+    def _poll_hotkey(self):
+        """Ctrl+Shift+L toggles lock (works even while the overlay is click-through)."""
+        if not self.winfo_exists():
+            return
+        try:
+            gk = ctypes.windll.user32.GetAsyncKeyState
+            down = bool(gk(0x11) & 0x8000 and gk(0x10) & 0x8000 and gk(0x4C) & 0x8000)
+            if down and not self._hk_down:
+                self.toggle_click_through()
+            self._hk_down = down
+            # While locked, the window is click-through everywhere except right over the lock
+            # button, so you can always click it to unlock (and drags elsewhere never hit it).
+            if not self.is_interactive and self.lock_btn and self.lock_btn.winfo_exists():
+                self._pass_clicks(not self._over_lock_button())
+        except Exception:
+            return
+        self.after(40, self._poll_hotkey)
 
     def _start_move(self, event):
         if self.is_interactive:
@@ -826,6 +956,7 @@ public class ChestReader : ReplayReader
     public List<string> PlayerDump = new();
     public int PlayerDataCount;
     public int? MyTeamIndex;
+    public string? Playlist;
     public readonly Dictionary<uint, ChestInfo> Chests = new();
     public readonly List<(uint Pawn, float T)> Searches = new();
     public readonly Dictionary<uint, List<(float T, double X, double Y, double Z)>> Positions = new();
@@ -925,6 +1056,7 @@ public class ChestReader : ReplayReader
             case GameState gs:
                 if (gs.RecorderPlayerState != null && gs.RecorderPlayerState.Value > 0)
                     Recorder ??= gs.RecorderPlayerState.Value;
+                if (Playlist == null) ReadPlaylist(gs);
                 break;
 
             case PlayerPawn pawn:
@@ -977,6 +1109,30 @@ public class ChestReader : ReplayReader
                 break;
         }
     }
+
+    // Game mode: look for any playlist/game-mode property on the game state (works across reader versions).
+    private void ReadPlaylist(object gs)
+    {
+        try
+        {
+            foreach (var p in gs.GetType().GetProperties())
+            {
+                if (!p.Name.Contains("Playlist", StringComparison.OrdinalIgnoreCase) &&
+                    !p.Name.Contains("GameMode", StringComparison.OrdinalIgnoreCase)) continue;
+                object? v = null;
+                try { v = p.GetValue(gs); } catch { }
+                if (v == null) continue;
+                var txt = Str(v) ?? v.ToString();
+                if (string.IsNullOrWhiteSpace(txt) || txt.StartsWith("Unreal.") || txt.StartsWith("System.")) continue;
+                Playlist = txt;
+                return;
+            }
+        }
+        catch { }
+    }
+
+    public int TeamSize() =>
+        MyTeamIndex.HasValue ? StateTeam.Count(kv => kv.Value == MyTeamIndex.Value) : 0;
 
     public int AdaptedExports;
     public bool UsedPawnFallback, FarFilterSkipped;
@@ -1586,6 +1742,8 @@ public static class Program
             team_opened = team.Count(c => !c.AsDestroyed),
             team_destroyed = team.Count(c => c.AsDestroyed),
             team_known = reader.MyTeamIndex.HasValue,
+            playlist = reader.Playlist,
+            team_size = reader.TeamSize(),
             players,
             by_type = mine.GroupBy(c => c.Type).ToDictionary(g => g.Key, g => g.Count()),
             chest_groups = reader.Groups.Where(LooksLikeChest).OrderBy(g => g).ToList(),
@@ -2105,6 +2263,8 @@ class Worker(threading.Thread):
                 "team_opened": int(r.get("team_opened", 0)) if ok else 0,
                 "team_destroyed": int(r.get("team_destroyed", 0)) if ok else 0,
                 "team_known": bool(r.get("team_known")),
+                "playlist": r.get("playlist") or "",
+                "team_size": int(r.get("team_size") or 0),
                 "players": r.get("players") or [],
                 "by_type": r.get("by_type") or {},
                 "day": dt.date.fromtimestamp(mtime).isoformat(),
@@ -2248,6 +2408,80 @@ class Switch(tk.Canvas):
         d = h - 2 * pad
         x = w - h + pad if on else pad
         self.create_oval(x, pad, x + d, pad + d, fill=ON_ACCENT if on else TEXT, width=0)
+
+
+DISCORD_URL = "https://discord.gg/svMWpjsP5H"
+PROMO_TEXT = "DOWNLOAD FREE  \u2022  github.com/Hmr-Abood"
+
+
+class ShineButton(tk.Canvas):
+    """Button with a light streak that sweeps across it every couple of seconds."""
+    BASE, HOT = "#5865f2", "#6f7bff"
+
+    def __init__(self, parent, text, command, w=108, h=30):
+        self.w, self.h = px(w), px(h)
+        super().__init__(parent, width=self.w, height=self.h, bg=parent.cget("bg"),
+                         highlightthickness=0, cursor="hand2")
+        self.command = command
+        self.bg_rect = self.create_rectangle(0, 0, self.w, self.h, fill=self.BASE, outline="")
+        self.shine = self.create_polygon(0, 0, 0, 0, 0, 0, fill=mix(self.BASE, "#ffffff", 0.55), outline="")
+        self.label = self.create_text(self.w / 2, self.h / 2, text=text, fill="#ffffff", font=font(9, "bold"))
+        self.pos = -self.w
+        self.pause = 20
+        self.job = None
+        self.bind("<Button-1>", lambda e: self.command())
+        self.bind("<Enter>", lambda e: self.itemconfig(self.bg_rect, fill=self.HOT))
+        self.bind("<Leave>", lambda e: self.itemconfig(self.bg_rect, fill=self.BASE))
+        self.bind("<Destroy>", self._stop)
+        self._tick()
+
+    def _stop(self, _e=None):
+        if self.job:
+            try:
+                self.after_cancel(self.job)
+            except Exception:
+                pass
+            self.job = None
+
+    def _clip(self, pts):
+        """Clip the streak polygon to the button's width so it never draws outside it."""
+        for edge, keep in ((0, lambda x: x >= 0), (self.w, lambda x: x <= self.w)):
+            out = []
+            for i, (x1, y1) in enumerate(pts):
+                x2, y2 = pts[(i + 1) % len(pts)]
+                a, b = keep(x1), keep(x2)
+                if a:
+                    out.append((x1, y1))
+                if a != b:
+                    t = (edge - x1) / (x2 - x1)
+                    out.append((edge, y1 + (y2 - y1) * t))
+            pts = out
+            if not pts:
+                break
+        return pts
+
+    def _tick(self):
+        try:
+            if not self.winfo_exists():
+                return
+            sweep = self.w + px(60)
+            if self.pause > 0:
+                self.pause -= 1
+                self.coords(self.shine, 0, 0, 0, 0, 0, 0)
+            else:
+                self.pos += sweep / 22  # ~0.5s sweep at 25ms per frame
+                x, sw, skew = self.pos, px(26), px(16)
+                pts = self._clip([(x + skew, 0), (x + skew + sw, 0), (x + sw, self.h), (x, self.h)])
+                if len(pts) >= 3:
+                    self.coords(self.shine, *[c for pt in pts for c in pt])
+                else:
+                    self.coords(self.shine, 0, 0, 0, 0, 0, 0)
+                if self.pos > self.w + px(10):
+                    self.pos, self.pause = -px(40), 70  # rest ~1.75s between shines
+            self.tag_raise(self.label)
+            self.job = self.after(25, self._tick)
+        except tk.TclError:
+            pass
 
 
 class NavButton(tk.Label):
@@ -2398,7 +2632,7 @@ class MatchDetail(tk.Toplevel):
         tk.Label(head, text=f"Match  {r.get('day', '')}  {r.get('time', '')}".strip(), bg=BG, fg=TEXT,
                  font=font(14, "bold")).pack(anchor="w")
         mine, team = st.replay_mine(r), st.replay_team_raw(r)
-        line = f"You: {mine}    Teammates: {team}    Added to your total: {st.replay_count(r)}"
+        line = f"Mode: {game_mode(r)}    You: {mine}    Teammates: {team}    Added to your total: {st.replay_count(r)}"
         if r.get("duration"):
             line += f"    Length: {fmt_duration(r['duration'])}"
         if team and not st.setting("count_team"):
@@ -2655,6 +2889,12 @@ class App:
     def _build_header(self):
         h = tk.Frame(self.root, bg=BG)
         h.pack(fill="x", padx=px(22), pady=(px(16), px(10)))
+        # Right-hand widgets are packed first so they always get their own space (Support is the far right,
+        # the status pill sits to its left with a gap).
+        ShineButton(h, "\U0001F4AC  Support", lambda: webbrowser.open(DISCORD_URL)).pack(side="right")
+        self.pill = tk.Label(h, text="\u25CF  Starting", bg=SURFACE, fg=MUTED, font=font(9, "bold"),
+                             padx=px(12), pady=px(5))
+        self.pill.pack(side="right", padx=(0, px(14)))
         logo = tk.Frame(h, bg=BG)
         logo.pack(side="left")
         tk.Label(logo, text=LOGO, bg=BG, fg=ACCENT, font=font(16, "bold")).pack(side="left")
@@ -2670,9 +2910,6 @@ class App:
             b.pack(side="left", padx=px(2))
             self.nav[key] = b
 
-        self.pill = tk.Label(h, text="\u25CF  Starting", bg=SURFACE, fg=MUTED, font=font(9, "bold"),
-                             padx=px(12), pady=px(5))
-        self.pill.pack(side="right")
 
         # shown (packed) only when a newer version exists on GitHub
         self.update_lbl = tk.Label(h, text="", bg=ACCENT, fg=ON_ACCENT, font=font(9, "bold"),
@@ -2793,9 +3030,9 @@ class App:
                  font=font(9)).pack(anchor="w", pady=(0, px(6)))
         c = card(page)
         c.pack(fill="both", expand=True)
-        cols = ("when", "total", "opened", "destroyed", "team", "length", "status")
+        cols = ("when", "mode", "total", "opened", "destroyed", "team", "length", "status")
         self.tv = ttk.Treeview(c, columns=cols, show="headings")
-        spec = {"when": ("MATCH", 160, "w"), "total": ("CHESTS", 80, "e"), "opened": ("OPENED", 80, "e"),
+        spec = {"when": ("MATCH", 160, "w"), "mode": ("MODE", 130, "w"), "total": ("CHESTS", 80, "e"), "opened": ("OPENED", 80, "e"),
                 "destroyed": ("DESTROYED", 100, "e"), "team": ("TEAMMATES", 100, "e"), "length": ("LENGTH", 90, "e"),
                 "status": ("STATUS", 240, "w")}
         for k, (t, w, a) in spec.items():
@@ -2837,7 +3074,7 @@ class App:
                         fmt_duration(r.get("duration")) if r.get("duration") else "-")
             else:
                 nums = ("-", "-", "-", "-", "-")
-            self.tv.insert("", "end", iid=rname, values=(when, *nums, status), tags=(tag,) if tag else ())
+            self.tv.insert("", "end", iid=rname, values=(when, game_mode(r) if r.get("ok") else "-", *nums, status), tags=(tag,) if tag else ())
 
     def _match_clicked(self, e):
         if self.tv.identify_region(e.x, e.y) != "cell":
