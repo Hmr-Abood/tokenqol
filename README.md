@@ -22,7 +22,7 @@ A Windows desktop tool for tracking Fortnite chest openings, monitoring Pirate S
 
 ### Pirate Shop Probability Tools
 - Calculate your chances of obtaining Pirate Shop Access.
-<img width="926" height="442" alt="image" src="https://github.com/user-attachments/assets/6d34a5bc-9923-442d-a15a-1f66b47e739f" />
+<img width="920" height="449" alt="image" src="https://github.com/user-attachments/assets/f24aab25-6030-49cd-86e7-f20037be41d5" />
 
 - Simulate chest openings and reward rolls.
 <img width="620" height="682" alt="image" src="https://github.com/user-attachments/assets/57bdbefc-5790-4342-aa45-0d46f5a1efee" />
