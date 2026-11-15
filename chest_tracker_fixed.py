@@ -40,6 +40,8 @@ APP_VERSION = "1.7"
 
 CHEST_KINDS = (("normal", "Normal"), ("rare", "Rare"), ("sprite", "Sprite"))
 
+REPO_SHA = "59515cf4781e60d2c14ba39d8dcab1d7fb986f17"
+REPO_ZIP = f"https://codeload.github.com/Cristiano3120/MoreFortniteReplayDecompression/zip/{REPO_SHA}"
 
 def chest_kind(type_name):
     """Sort a chest's internal class name into Normal / Rare / Sprite."""
