@@ -1,88 +1,137 @@
- Fortnite Chest Tracker
+# TokenQOL
+### Fortnite Chest Tracker — all you need for the Pirate Shop grind.
 
-A Windows desktop tool for tracking Fortnite chest openings, monitoring Pirate Shop progress, and analyzing reward probabilities.
+Track every chest, understand your Pirate Shop odds, and keep your progress visible while you play or stream.
 
-<img width="950" height="816" alt="image" src="https://github.com/user-attachments/assets/db258723-4120-49c6-b02f-0d265e4535e5" />
+[![Download](https://img.shields.io/badge/Download-Latest%20Release-36d6c8?style=for-the-badge)](https://github.com/Hmr-Abood/tokenqol/releases/latest)
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?style=for-the-badge&logo=windows)](https://www.microsoft.com/windows)
+[![License](https://img.shields.io/badge/License-See%20Repository-lightgrey?style=for-the-badge)](LICENSE)
 
+<img width="950" alt="TokenQOL application preview" src="https://github.com/user-attachments/assets/db258723-4120-49c6-b02f-0d265e4535e5" />
+
+---
+
+## What is TokenQOL?
+
+**TokenQOL** is a Windows desktop companion for Fortnite players working toward Pirate Shop rewards. It reads your locally saved match replays and turns your chest openings into useful stats, probability estimates, and stream-ready overlays.
+
+No more manually counting chests after every match.
 
 ## Features
 
-### Chest Tracking
-- Automatically scans locally saved Fortnite replay files.
-<img width="939" height="752" alt="image" src="https://github.com/user-attachments/assets/077f88b3-619c-4fbe-ba56-7ea4fd0df4c1" />
+### Chest tracking
+- Automatically scans Fortnite replay files saved on your PC.
+- Counts chests opened by you and tracks teammate chest activity.
+- Separates chest totals by type: Normal, Rare, and Sprite.
+- Keeps match history and cumulative statistics.
+- View daily and weekly progress, matches counted, and playtime.
+- Identifies match information such as game mode when available.
 
-- Tracks your total chest openings.
-<img width="910" height="88" alt="image" src="https://github.com/user-attachments/assets/56d59895-dbe8-49d2-93b8-a214f1788c91" />
+<img width="939" alt="Replay scanning and chest tracking" src="https://github.com/user-attachments/assets/077f88b3-619c-4fbe-ba56-7ea4fd0df4c1" />
 
-- Tracks each teammate's chest count individually.
-<img width="598" height="578" alt="image" src="https://github.com/user-attachments/assets/a9e3d4bd-8c1e-4bf8-a3a3-847a1db26015" />
+<img width="910" alt="Chest count overview" src="https://github.com/user-attachments/assets/56d59895-dbe8-49d2-93b8-a214f1788c91" />
 
-- View chest statistics across multiple matches.
-- Keep a history of processed matches.
+<img width="598" alt="Team chest statistics" src="https://github.com/user-attachments/assets/a9e3d4bd-8c1e-4bf8-a3a3-847a1db26015" />
 
-### Pirate Shop Probability Tools
-- Calculate your chances of obtaining Pirate Shop Access.
-<img width="920" height="449" alt="image" src="https://github.com/user-attachments/assets/f24aab25-6030-49cd-86e7-f20037be41d5" />
+### Pirate Shop odds & simulator
+- Estimate your chance of receiving Pirate Shop Access.
+- Simulate chest rolls and see the outcomes.
+- Check how many rolls it takes to reach probability milestones.
+- Track your progress toward your next milestone.
+- Explore Treasure Hour information.
 
-- Simulate chest openings and reward rolls.
-<img width="620" height="682" alt="image" src="https://github.com/user-attachments/assets/57bdbefc-5790-4342-aa45-0d46f5a1efee" />
+<img width="920" alt="Pirate Shop probability calculator" src="https://github.com/user-attachments/assets/f24aab25-6030-49cd-86e7-f20037be41d5" />
 
-- See how many rolls it takes to receive a specific reward.
-<img width="626" height="111" alt="image" src="https://github.com/user-attachments/assets/b9c294c4-82a1-4e94-9d03-722fb6ac5618" />
+<img width="620" alt="Chest roll simulator" src="https://github.com/user-attachments/assets/57bdbefc-5790-4342-aa45-0d46f5a1efee" />
 
-- Track milestones throughout your chest-hunting journey.
-<img width="900" height="151" alt="image" src="https://github.com/user-attachments/assets/96c90658-9f16-4241-a5c2-6f022dfcacb5" />
+<img width="626" alt="Roll and reward results" src="https://github.com/user-attachments/assets/b9c294c4-82a1-4e94-9d03-722fb6ac5618" />
 
-- Monitor your progress toward rare rewards.
+<img width="900" alt="Progress milestones" src="https://github.com/user-attachments/assets/96c90658-9f16-4241-a5c2-6f022dfcacb5" />
 
-### Customization
-- Customizable stream overlays for displaying chest statistics.
-- <img width="261" height="287" alt="image" src="https://github.com/user-attachments/assets/c6866821-c836-42d2-85e5-27f024caa3bf" />
+### Stream & game overlays
+- Display live chest statistics in a separate overlay.
+- Use the stream window with OBS Window Capture.
+- Choose which statistics appear, including total chests, token chance, recent activity, and more.
+- Adjust overlay appearance and background options.
 
-<img width="918" height="610" alt="image" src="https://github.com/user-attachments/assets/969298d6-d30b-4588-a4ed-94ada35f83dc" />
+<img width="918" alt="Customizable stream overlay" src="https://github.com/user-attachments/assets/969298d6-d30b-4588-a4ed-94ada35f83dc" />
 
-- Multiple interface themes.
-<img width="890" height="480" alt="image" src="https://github.com/user-attachments/assets/4194edd8-4412-49f6-9116-dadfc302f63c" />
+<img width="261" alt="Overlay preview" src="https://github.com/user-attachments/assets/c6866821-c836-42d2-85e5-27f024caa3bf" />
 
-- Personalize your tracking experience.
+### Make it yours
+- Multiple built-in themes.
+- Custom colors, fonts, and interface sizing.
+- Personalize the look of your tracker and overlays.
 
-## Pirate Shop Access Odds
+<img width="890" alt="Application themes" src="https://github.com/user-attachments/assets/4194edd8-4412-49f6-9116-dadfc302f63c" />
 
-The tracker uses an estimated drop rate of:
+---
 
-**1 in 137,500 chests**
+## Getting started
 
-The probability calculator and simulator help you understand the odds, simulate different outcomes, and track your progress.
+### 1. Download
+Head to the [**latest release**](https://github.com/Hmr-Abood/tokenqol/releases/latest) and download the available Windows release.
 
-Actual drops are random. Reaching a certain number of chests does not guarantee a reward.
+### 2. Extract and launch
+Extract the downloaded ZIP file, then follow the included launch/setup instructions.
 
-## How It Works
+### 3. Save Fortnite replays
+Make sure Fortnite match replays are being saved. The tracker reads the replay files stored locally on your PC.
 
-1. Play Fortnite normally.
-2. Make sure match replays are being saved.
-3. Open Fortnite Chest Tracker.
-4. Scan your replay files.
-5. View your chest counts and statistics.
-6. Use the simulator, milestones, and stream overlay to track your progress.
+### 4. Scan your matches
+Open TokenQOL and scan your replay files. Your chest counts and match statistics will appear in the tracker.
 
-## Safety
+### 5. Track your progress
+Use the probability tools, milestones, simulator, and overlays to follow your Pirate Shop grind.
 
-The application analyzes locally saved Fortnite replay files.
+> **Tip:** New matches can only be analyzed when a replay file is available for that match.
 
-It does not:
+## Pirate Shop probability
+
+The probability calculator currently uses an estimated rate of:
+
+**1 in 137,500 chests per roll**
+
+The chance of receiving at least one reward across multiple rolls is calculated using:
+
+`1 - (1 - 1 / 137500)^n`
+
+where `n` is the number of chests.
+
+This is a probability estimate, not a guarantee. Random outcomes can vary, and opening a certain number of chests does not guarantee a reward. Drop rates and reward availability may change.
+
+## Safety & privacy
+
+TokenQOL analyzes replay files that Fortnite has already saved on your computer.
+
+It does **not**:
 - Inject code into Fortnite.
-- Read or modify game memory.
+- Read or modify Fortnite's game memory.
 - Automate gameplay or player inputs.
 - Modify Fortnite game files.
 
+Your replay analysis is performed locally by the desktop application.
+
 ## Requirements
 
-- Windows
-- Fortnite replay files
-- The application dependencies included with the release
+- Windows.
+- Fortnite replay files saved locally.
+- The files and dependencies provided with the release.
+
+## Issues & feedback
+
+Found a bug or have an idea? [Open an issue](https://github.com/Hmr-Abood/tokenqol/issues) and include as much detail as possible.
 
 ## Disclaimer
 
-This is an independent community-made tool and is not affiliated with, endorsed by, or sponsored by Epic Games or Fortnite.
+TokenQOL is an independent, community-made project. It is not affiliated with, endorsed by, or sponsored by Epic Games. Fortnite is a trademark of Epic Games, Inc.
 
-Drop rates and reward availability may change. Always refer to the latest in-game information for official reward
+---
+
+<p align="center">
+  Made for the Pirate Shop grind.
+  <br />
+  <a href="https://github.com/Hmr-Abood/tokenqol/releases/latest">Download TokenQOL</a>
+  ·
+  <a href="https://github.com/Hmr-Abood/tokenqol/issues">Report an issue</a>
+</p>
